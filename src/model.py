@@ -6,11 +6,11 @@ import segmentation_models_pytorch as smp
 import lightning as L
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
 from torchvision import tv_tensors
 from torchvision.transforms.functional import to_pil_image
 from torchvision.transforms import v2
-from pycocotools.cocoeval import COCOeval
 from torch.utils.data import DataLoader
 import segmentation_models_pytorch as smp
 
@@ -24,7 +24,7 @@ from src.utils import convert_to_coco_format
 
 
 class TemporalSegmentationModel(nn.Module):
-    def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size, temporal_model="ConvLSTM", num_layers=1):
+    def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size, temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1):
         """
         Initialize the TemporalSegmentationModel.
 
@@ -35,10 +35,14 @@ class TemporalSegmentationModel(nn.Module):
             image_size (tuple): Size of the input image.
             temporal_model (str): Type of temporal model. Default is "ConvLSTM".
             num_layers (int): Number of layers in the temporal model. Default is 1.
+            encoder_depth (int): Depth of the encoder. Default is 5.
+            temporal_depth (int): Depth of the temporal model. Default is 1.
         """
         super().__init__()
+        assert encoder_depth >= temporal_depth, "Encoder depth should be greater than or equal to temporal depth."
+        # Initialize the segmentation model from segmentation_models_pytorch
         model = getattr(smp, segmentation_model_name)(
-            encoder_name=encoder_name, encoder_weights="imagenet", classes=num_classes + 1, in_channels=1
+            encoder_name=encoder_name, encoder_weights="imagenet", classes=num_classes + 1, in_channels=1, encoder_depth=encoder_depth
         )
         self.encoder = model.encoder
         self.decoder = model.decoder
@@ -46,11 +50,15 @@ class TemporalSegmentationModel(nn.Module):
 
         self.temporal_models = nn.ModuleList()
         h, w = image_size
-        for i, out_channel in enumerate(self.encoder.out_channels[1:]):
+        # Initialize the temporal models (ConvLSTM or ConvGRU) for each encoder output channel
+        base_depth = encoder_depth - temporal_depth
+        if "mit" in encoder_name:
+            base_depth += 1
+        for i, out_channel in enumerate(self.encoder.out_channels[base_depth:]):
             if temporal_model == "ConvLSTM":
                 self.temporal_models.append(
                     ConvLSTM(
-                        input_size=(h // (2 ** (i + 1)), w // (2 ** (i + 1))),
+                        input_size=(h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
                         input_dim=out_channel,
                         hidden_dim=out_channel,
                         kernel_size=(3, 3),
@@ -61,7 +69,7 @@ class TemporalSegmentationModel(nn.Module):
             elif temporal_model == "ConvGRU":
                 self.temporal_models.append(
                     ConvGRU(
-                        input_size=(h // (2 ** (i + 1)), w // (2 ** (i + 1))),
+                        input_size=(h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
                         input_dim=out_channel,
                         hidden_dim=out_channel,
                         kernel_size=(3, 3),
@@ -87,25 +95,27 @@ class TemporalSegmentationModel(nn.Module):
         batch_size, seq_len, c, h, w = x.size()
         x = x.reshape(batch_size * seq_len, c, h, w)
 
+        # Extract features using the encoder
         features = self.encoder(x)
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in features]
 
-        temporal_outs = [features[0]]
+        temporal_outs = features[:-len(self.temporal_models)]
 
         if hidden_state is None:
             hidden_state = [None] * len(self.temporal_models)
 
+        # Apply temporal models to the features
         for i, temporal_model in enumerate(self.temporal_models):
-            temporal_out, hidden_state[i] = temporal_model(features[i + 1], hidden_state[i])
+            temporal_out, hidden_state[i] = temporal_model(features[i - len(self.temporal_models)], hidden_state[i])
             temporal_outs.append(temporal_out)
         temporal_outs = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_outs]
 
+        # Decode the features to get the segmentation output
         x = self.decoder(temporal_outs)
         x = self.head(x)
         x = x.reshape(batch_size, seq_len, *x.shape[1:])
 
         return x, hidden_state
-
 
 class SegmentationTrainer(L.LightningModule):
     def __init__(
@@ -120,6 +130,10 @@ class SegmentationTrainer(L.LightningModule):
         sequence_length,
         image_size,
         truncated_bptt_steps,
+        logdir=None,
+        alpha=0.5,  # Add alpha parameter
+        encoder_depth=5,  # Add encoder_depth parameter
+        temporal_depth=1,  # Add temporal_depth parameter
     ):
         """
         Initialize the SegmentationTrainer.
@@ -135,6 +149,10 @@ class SegmentationTrainer(L.LightningModule):
             sequence_length (int): Sequence length.
             image_size (tuple): Size of the input image.
             truncated_bptt_steps (int): Truncated backpropagation through time steps.
+            logdir (str): Directory to save the logs. Default is None.
+            alpha (float): Coefficient for CrossEntropy loss. Default is 0.5.
+            encoder_depth (int): Depth of the encoder. Default is 5.
+            temporal_depth (int): Depth of the temporal model. Default is 1.
         """
         super().__init__()
         self.model = model
@@ -147,7 +165,12 @@ class SegmentationTrainer(L.LightningModule):
         self.sequence_length = sequence_length
         self.image_size = image_size
         self.truncated_bptt_steps = truncated_bptt_steps
+        self.logdir = logdir
+        self.alpha = alpha  # Set alpha
+        self.encoder_depth = encoder_depth  # Set encoder_depth
+        self.temporal_depth = temporal_depth  # Set temporal_depth
 
+        # Define data augmentation transforms
         self.transform = v2.Compose(
             [
                 v2.RandomApply([v2.RandomAffine(degrees=0, translate=(0.15, 0.05), scale=(0.9, 1.1), shear=0.1)]),
@@ -158,16 +181,10 @@ class SegmentationTrainer(L.LightningModule):
             ]
         )
 
-        # self.transform = v2.Compose([
-        #     v2.RandomAffine(degrees=0, translate=(0.3, 0.1), scale=(0.8, 1.2), shear=0.2),
-        #     v2.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.8, 1.2)),
-        #     v2.RandomApply([v2.GaussianNoise()]),
-        #     v2.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2)),
-        #     v2.ColorJitter(brightness=0.2
-        # , contrast=0.2),
-        # ])
         self.scale = v2.ToDtype(torch.float32, scale=True)
-        self.loss = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
+        self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
+        self.loss_crossentropy = nn.CrossEntropyLoss()
+        self.alpha = alpha  # Coefficient for CrossEntropy loss
 
     def show_batch(self, win_size=(50, 25), save=True):
         """
@@ -188,6 +205,7 @@ class SegmentationTrainer(L.LightningModule):
                 vis_images.append(img)
             return vis_images
 
+        # Create a DataLoader for the training dataset
         train_dataloader = DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -198,6 +216,8 @@ class SegmentationTrainer(L.LightningModule):
         imgs, targets = next(iter(train_dataloader))
         masks = targets["masks"]
         imgs_aug, masks_aug = imgs.clone(), masks.clone()
+        
+        # Apply data augmentation transforms
         for i, (img, mask) in enumerate(zip(imgs, masks)):
             imgs_aug[i], masks_aug[i] = self.transform(img, tv_tensors.Mask(mask))  # apply transforms
         imgs = self.scale(imgs)
@@ -259,7 +279,10 @@ class SegmentationTrainer(L.LightningModule):
 
         masks = masks.reshape(-1, *masks.shape[2:])  # Flatten the batch and sequence dimensions
         targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:])  # Flatten the batch and sequence dimensions
-        loss = self.loss(masks, targets.long())
+        
+        loss_tversky = self.loss_tversky(masks, targets.long())
+        loss_crossentropy = self.loss_crossentropy(masks, targets.long())
+        loss = loss_tversky + self.alpha * loss_crossentropy
 
         self.log(f"{stage}_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         return loss
@@ -285,6 +308,7 @@ class SegmentationTrainer(L.LightningModule):
     def on_test_start(self):
         self.coco_gt = self.test_dataset.coco
         self.coco_dt = []
+        self.tp, self.fp, self.fn, self.tn = [], [], [], []
         self.video_id = None
 
     def test_step(self, batch):
@@ -295,35 +319,49 @@ class SegmentationTrainer(L.LightningModule):
             self.hidden_state = None
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
+        targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(0, 3, 1, 2)  # Remove the background class
+        masks = torch.nn.Softmax(dim=1)(masks[0])[:, 1:] # .cpu().detach().numpy()  # Remove the background class
 
-        masks = torch.nn.Softmax(dim=1)(masks[0])[:, 1:].cpu().detach().numpy()  # Remove the background class
-        image_ids = targets["image_ids"].cpu().detach().numpy()
-
-        self.coco_dt.extend(convert_to_coco_format(zip(masks, image_ids)))
+        tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode='multilabel', threshold=0.5)
+        self.tp.append(tp)
+        self.fp.append(fp)
+        self.fn.append(fn)
+        self.tn.append(tn)
 
     def on_test_epoch_end(self):
-        if not self.trainer.sanity_checking:
-            coco_dt_path = Path(self.logger.log_dir) / f"coco_detections.json"
-            with open(coco_dt_path, "w") as f:
-                json.dump(self.coco_dt, f)
+        self.tp = torch.cat(self.tp)
+        self.fp = torch.cat(self.fp)
+        self.fn = torch.cat(self.fn)
+        self.tn = torch.cat(self.tn)
+        seq_obj_appear = (self.tp + self.fn).bool()
 
-            coco_dt = self.coco_gt.loadRes(str(coco_dt_path))
-            coco_eval = COCOeval(self.coco_gt, coco_dt, "segm")
-            coco_eval.evaluate()
-            coco_eval.accumulate()
-            coco_eval.summarize()
+        iou_score = smp.metrics.iou_score(self.tp, self.fp, self.fn, self.tn)
+        f1_score = smp.metrics.f1_score(self.tp, self.fp, self.fn, self.tn)
+        overall_score = 0.5 * (iou_score + f1_score)
+        seq_obj_appear_sum = seq_obj_appear.sum(0)
+        
+        iou_score = ((iou_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
+        f1_score = ((f1_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
+        overall_score = ((overall_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
 
-            self.log("val_mAP", coco_eval.stats[0])
-            self.log("val_mAP_50", coco_eval.stats[1])
-            self.log("val_mAP_75", coco_eval.stats[2])
-            self.log("val_mAP_small", coco_eval.stats[3])
-            self.log("val_mAP_medium", coco_eval.stats[4])
-            self.log("val_mAP_large", coco_eval.stats[5])
-            self.coco_dt = []
+        mean_iou_score = iou_score.mean()
+        mean_f1_score = f1_score.mean()
+        mean_overall_score = overall_score.mean()
 
+        results = {
+            "iou_score": iou_score.tolist(),
+            "f1_score": f1_score.tolist(),
+            "overall_score": overall_score.tolist(),
+            "mean_iou_score": mean_iou_score.mean().item(),
+            "mean_f1_score": mean_f1_score.mean().item(),
+            "mean_overall_score": mean_overall_score.mean().item(),
+        }
+
+        logdir = Path(self.logdir)
+        with open(logdir / "test_results.json", "w") as f:
+            json.dump(results, f, indent=4)
 
 if __name__ == "__main__":
-    from src.data_loader import UltrasoundDataset
     from pathlib import Path
 
     # Sample configuration
@@ -363,6 +401,9 @@ if __name__ == "__main__":
         temporal_model=config["model"]["temporal_model"],
         image_size=tuple(config["model"]["image_size"]),
     )
+
+    # Print model size
+    model.print_model_size()
 
     # Create trainer
     trainer = SegmentationTrainer(

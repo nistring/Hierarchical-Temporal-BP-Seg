@@ -1,13 +1,27 @@
-from torchvision.io import decode_image
+import random
+from typing import Optional, List, Iterator
+
 import torch
 from torch.utils.data import Dataset
-from pycocotools.coco import COCO
-import random
+from torch.utils.data.distributed import DistributedSampler
+from torchvision.io import decode_image
 from torchvision.transforms import v2
 from torchvision import tv_tensors
-import numpy as np
-from typing import Optional, List, Iterator
-from torch.utils.data.distributed import DistributedSampler
+from pycocotools.coco import COCO
+
+# Mapping of category IDs to new category IDs
+category_match = {
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 5,
+    6: 6,
+    7: 4, # LT -> C8
+    8: 7,
+    9: 8,
+    10: 9,
+}
 
 class BaseUltrasoundDataset(Dataset):
     def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, batch_size: int):
@@ -70,7 +84,8 @@ class BaseUltrasoundDataset(Dataset):
 
         for ann in coco_annotation:
             ann_mask = torch.tensor(self.coco.annToMask(ann), dtype=torch.bool)
-            mask[ann_mask] = ann["category_id"]
+            mask[ann_mask] = category_match[ann["category_id"]]
+            # mask[ann_mask] = ann["category_id"]
 
         return image, mask
 
@@ -91,80 +106,6 @@ class BaseUltrasoundDataset(Dataset):
             images.append(image)
             masks.append(mask)
         return self.preprocess(torch.stack(images), tv_tensors.Mask(torch.stack(masks)))
-
-
-class UltrasoundDataset(BaseUltrasoundDataset):
-    def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, batch_size: int):
-        """
-        Initialize the UltrasoundDataset.
-
-        Args:
-            data_dir (str): Directory containing the data.
-            annotations_file (str): Path to the annotations file.
-            image_size (tuple): Size of the input image.
-            sequence_length (int): Sequence length.
-            batch_size (int): Batch size.
-        """
-        super().__init__(data_dir, annotations_file, image_size, sequence_length, batch_size)
-        self.total_len = self._total_length()
-        self._sample_indices()  # Sample indices at initialization
-
-    def _total_length(self) -> int:
-        """
-        Calculate the total length of the dataset.
-
-        Returns:
-            int: Total length of the dataset.
-        """
-        total_length = 0
-        for img_ids in self.video_id_to_img_ids.values():
-            total_length += len(img_ids) - (self.sequence_length - 1)
-        return total_length
-
-    def _sample_indices(self):
-        """
-        Sample indices for the dataset.
-        """
-        indices = []
-        cumulative_length = 0
-        img_ids_list = list(self.video_id_to_img_ids.values())
-
-        i = 0
-        for idx in np.sort(np.random.choice(self.total_len, len(self), replace=False)):
-            while True:
-                if cumulative_length + len(img_ids_list[i]) - (self.sequence_length - 1) > idx:
-                    indices.append((img_ids_list[i][idx - cumulative_length], random.random() > 0.5))
-                    break
-                else:
-                    cumulative_length += len(img_ids_list[i]) - (self.sequence_length - 1)
-                    i += 1
-        self.indices = indices
-
-    def __len__(self) -> int:
-        """
-        Get the length of the dataset.
-
-        Returns:
-            int: Length of the dataset.
-        """
-        return self.total_len * 2 // self.sequence_length
-
-    def __getitem__(self, idx: int) -> tuple:
-        """
-        Get an item from the dataset.
-
-        Args:
-            idx (int): Index of the item.
-
-        Returns:
-            tuple: Loaded images and masks.
-        """
-        start, reverse = self.indices[idx]
-        img_ids_sampled = [x for x in range(start, start + self.sequence_length)]
-        if reverse:
-            img_ids_sampled = img_ids_sampled[::-1]
-        images, masks = self._load_images_and_masks(img_ids_sampled)
-        return images, {"masks": masks}
 
 
 class UltrasoundTrainDataset(BaseUltrasoundDataset):
@@ -190,7 +131,9 @@ class UltrasoundTrainDataset(BaseUltrasoundDataset):
 
     def _create_img_list(self):
         """
-        Create a list of image IDs for the dataset.
+        Create a list of image sequences for training.
+
+        This method generates sequences of image IDs for each video, considering the sequence length and truncated BPTT steps.
         """
         img_list = []
         for video_id, img_ids in self.video_id_to_img_ids.items():
@@ -210,24 +153,9 @@ class UltrasoundTrainDataset(BaseUltrasoundDataset):
         self.img_list = img_list
 
     def __len__(self) -> int:
-        """
-        Get the length of the dataset.
-
-        Returns:
-            int: Length of the dataset.
-        """
         return len(self.video_id_to_img_ids) * self.truncated_bptt_steps
 
     def __getitem__(self, idx: int) -> tuple:
-        """
-        Get an item from the dataset.
-
-        Args:
-            idx (int): Index of the item.
-
-        Returns:
-            tuple: Loaded images and masks.
-        """
         video_id, img_ids = self.img_list[idx]
         images, masks = self._load_images_and_masks(img_ids)
         return images, {"masks": masks}
@@ -249,12 +177,6 @@ class UltrasoundTestDataset(BaseUltrasoundDataset):
         self.img_list = self._create_img_list()
 
     def _create_img_list(self) -> list:
-        """
-        Create a list of image IDs for the dataset.
-
-        Returns:
-            list: List of image IDs.
-        """
         img_list = []
         for video_id, img_ids in self.video_id_to_img_ids.items():
             for i in range(0, len(img_ids), self.sequence_length):
@@ -262,24 +184,9 @@ class UltrasoundTestDataset(BaseUltrasoundDataset):
         return img_list
 
     def __len__(self) -> int:
-        """
-        Get the length of the dataset.
-
-        Returns:
-            int: Length of the dataset.
-        """
         return len(self.img_list)
 
     def __getitem__(self, idx: int) -> tuple:
-        """
-        Get an item from the dataset.
-
-        Args:
-            idx (int): Index of the item.
-
-        Returns:
-            tuple: Loaded images and masks.
-        """
         video_id, img_ids = self.img_list[idx]
         images, masks = self._load_images_and_masks(img_ids)
         return images, {"video_id": video_id, "image_ids": img_ids, "masks": masks}
@@ -304,10 +211,9 @@ class DistributedVideoSampler(DistributedSampler):
 
     def __iter__(self) -> Iterator[List[int]]:
         """
-        Get an iterator for the sampler.
+        Return an iterator over the indices of the dataset.
 
-        Returns:
-            Iterator[List[int]]: Iterator for the sampler.
+        This method generates indices for the current process based on the rank and number of replicas.
         """
         indices = list(range(len(self.dataset)))
         # subsample

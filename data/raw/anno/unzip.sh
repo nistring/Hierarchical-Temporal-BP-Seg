@@ -16,3 +16,15 @@ do
     echo "Could not unpack $zip - mkdir failed"
   fi
 done
+
+# for i in $(seq 1 75)
+# do
+#   old_name=$(printf "CNUH_DC04_BPB1_%04d.mp4.zip" $i)
+#   new_name=$(printf "CNUH_DC04_BPB1_%04d.zip" $i)
+#   if [ -f "$old_name" ]
+#   then
+#     mv "$old_name" "$new_name"
+#   else
+#     echo "File $old_name does not exist"
+#   fi
+# done

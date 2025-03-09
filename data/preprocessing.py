@@ -59,8 +59,8 @@ def preprocess(is_vid_train_frame=False):
         is_vid_train_frame (bool): Flag to indicate if the frames are for training or validation.
     """
     anno_root = "raw/anno/train" if is_vid_train_frame else "raw/anno/val"
-    ann_file = "SUIT/annotations/train.json" if is_vid_train_frame else "SUIT/annotations/val.json"
-    save_dir = "SUIT/data/train" if is_vid_train_frame else "SUIT/data/val"
+    ann_file = "SUIT/coco_annotations/train.json" if is_vid_train_frame else "SUIT/coco_annotations/val.json"
+    save_dir = "SUIT/images/train" if is_vid_train_frame else "SUIT/images/val"
     os.makedirs(save_dir, exist_ok=True)
 
     categories = [
@@ -82,7 +82,7 @@ def preprocess(is_vid_train_frame=False):
     for vid_id, anno_dir in enumerate(os.listdir(anno_root), start=1):
         tree = ET.parse(os.path.join(anno_root, anno_dir, "annotations.xml"))
         root = tree.getroot()
-        name = "CNUH_DC04_BPB1_" + anno_dir.split("_")[-1]
+        name = anno_dir + ".mp4"
         first_frame_img_id = img_id
 
         videos.append(dict(id=vid_id, name=name))
@@ -133,7 +133,7 @@ def preprocess(is_vid_train_frame=False):
 
 
 if __name__ == "__main__":
-    # preprocess(True)
+    preprocess(True)
     # preprocess(False)
-    for i in range(41, 51):
-        crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")
+    # for i in range(51, 76):
+    #     crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")

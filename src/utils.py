@@ -1,7 +1,7 @@
 import cv2
 import torch
 from torchvision.transforms import v2
-
+import numpy as np
 
 def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     """
@@ -31,7 +31,7 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     masks /= 2
     masks[0] += 0.5
     masks = v2.Resize(frame.shape[1:])(masks)
-    frame = frame * masks[0] + (masks[1:, None] * colors[..., None, None]).sum(0)  # Overlay the masks on the frame
+    frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)  # Overlay the masks on the frame
     frame = frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
     return frame
 
@@ -47,17 +47,18 @@ def convert_to_coco_format(predictions: list) -> list:
         list: Predictions in COCO format.
     """
     coco_predictions = []
-    for masks_pred, class_probs, image_id in predictions:
-        for i, (mask, score) in enumerate(zip(masks_pred, class_probs)):
-            if score > 0.5:
-                contours, _ = cv2.findContours((mask > 0.5).astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for masks_pred, image_id in predictions:
+        for i, mask in enumerate(masks_pred):
+            mask = mask > 0.5
+            if np.any(mask):
+                contours, _ = cv2.findContours((mask).astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 segmentation = []
                 for contour in contours:
                     contour = contour.flatten().tolist()
                     if len(contour) > 4:  # COCO format requires at least 3 points (6 values)
                         segmentation.append(contour)
                 if segmentation:
-                    coco_pred = {"image_id": int(image_id), "category_id": i + 1, "segmentation": segmentation, "score": float(score)}
+                    coco_pred = {"image_id": int(image_id), "category_id": i + 1, "segmentation": segmentation}
                     coco_predictions.append(coco_pred)
     return coco_predictions
 
