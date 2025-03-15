@@ -1,3 +1,3 @@
-python main.py --config_file lightning_logs/version_21/config.yaml \
+python main.py --config_file lightning_logs/config7/config.yaml \
     --mode "test" \
-    --best_model_path lightning_logs/version_21/checkpoints/epoch=63-step=640.ckpt
+    --best_model_path lightning_logs/config7/checkpoints/epoch=32-step=1155.ckpt

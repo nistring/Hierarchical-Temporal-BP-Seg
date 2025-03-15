@@ -20,8 +20,7 @@ sys.path.append("./")
 from src.convgru import ConvGRU
 from src.convlstm import ConvLSTM
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
-from src.utils import convert_to_coco_format
-
+from src.utils import post_processing
 
 class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size, temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1):
@@ -181,7 +180,6 @@ class SegmentationTrainer(L.LightningModule):
             ]
         )
 
-        self.scale = v2.ToDtype(torch.float32, scale=True)
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
         self.loss_crossentropy = nn.CrossEntropyLoss()
         self.alpha = alpha  # Coefficient for CrossEntropy loss
@@ -220,8 +218,6 @@ class SegmentationTrainer(L.LightningModule):
         # Apply data augmentation transforms
         for i, (img, mask) in enumerate(zip(imgs, masks)):
             imgs_aug[i], masks_aug[i] = self.transform(img, tv_tensors.Mask(mask))  # apply transforms
-        imgs = self.scale(imgs)
-        imgs_aug = self.scale(imgs_aug)
 
         original_images = _to_vis(imgs, masks)
         augmented_images = _to_vis(imgs_aug, masks_aug)
@@ -244,7 +240,6 @@ class SegmentationTrainer(L.LightningModule):
         if self.trainer.training:
             images, targets["masks"] = self.transform(images, tv_tensors.Mask(targets["masks"]))  # perform GPU/Batched data augmentation
             targets["masks"] = torch.Tensor(targets["masks"])
-        images = self.scale(images)  # Scale images
         return images, targets
 
     def train_dataloader(self):
@@ -278,13 +273,15 @@ class SegmentationTrainer(L.LightningModule):
         masks, self.hidden_state = self.model(images, self.hidden_state)
 
         masks = masks.reshape(-1, *masks.shape[2:])  # Flatten the batch and sequence dimensions
-        targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:])  # Flatten the batch and sequence dimensions
+        targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:]).long()  # Flatten the batch and sequence dimensions
         
-        loss_tversky = self.loss_tversky(masks, targets.long())
-        loss_crossentropy = self.loss_crossentropy(masks, targets.long())
+        loss_tversky = self.loss_tversky(masks, targets)
+        loss_crossentropy = self.loss_crossentropy(masks, targets)
         loss = loss_tversky + self.alpha * loss_crossentropy
 
         self.log(f"{stage}_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss_tversky", loss_tversky, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss_crossentropy", loss_crossentropy, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
     def on_train_batch_start(self, batch, batch_idx):
@@ -306,8 +303,6 @@ class SegmentationTrainer(L.LightningModule):
         return self.compute_loss(batch, batch_idx, "val")
 
     def on_test_start(self):
-        self.coco_gt = self.test_dataset.coco
-        self.coco_dt = []
         self.tp, self.fp, self.fn, self.tn = [], [], [], []
         self.video_id = None
 
@@ -320,7 +315,7 @@ class SegmentationTrainer(L.LightningModule):
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
         targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(0, 3, 1, 2)  # Remove the background class
-        masks = torch.nn.Softmax(dim=1)(masks[0])[:, 1:] # .cpu().detach().numpy()  # Remove the background class
+        masks = post_processing(masks)[:, 1:]  # Remove the background class
 
         tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode='multilabel', threshold=0.5)
         self.tp.append(tp)

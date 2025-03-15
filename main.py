@@ -8,6 +8,7 @@ import yaml
 import torch
 import argparse
 from lightning.pytorch.strategies import DDPStrategy
+from lightning.pytorch.loggers import TensorBoardLogger
 
 class SaveConfigCallback(Callback):
     def __init__(self, config):
@@ -106,7 +107,7 @@ def main(config, best_model_path=None):
         sync_batchnorm=True,
         accumulate_grad_batches=config["trainer"]["accumulate_grad_batches"],
         use_distributed_sampler=False,
-        logger=False if test else True
+        logger=False if test else TensorBoardLogger(save_dir="./",version=config["config_file"].split("/")[-1].split(".")[0]),
     )
 
     if test:
@@ -127,6 +128,7 @@ if __name__ == "__main__":
     with open(args.config_file, "r") as f:
         config = yaml.safe_load(f)
     
+    config["config_file"] = args.config_file
     config["mode"] = args.mode
     if args.best_model_path:
         config["best_model_path"] = args.best_model_path

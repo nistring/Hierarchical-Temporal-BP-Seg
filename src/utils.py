@@ -3,6 +3,7 @@ import torch
 from torchvision.transforms import v2
 import numpy as np
 
+
 def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     """
     Process video stream and overlay predictions on the frame.
@@ -16,56 +17,28 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     """
     colors = torch.Tensor(
         [
-            (255, 255, 0),
-            (0, 255, 255),
-            (255, 0, 0),
-            (0, 0, 255),
-            (128, 255, 128),
-            (128, 0, 128),
-            (0, 128, 128),
-            (0, 255, 0),
-            (255, 128, 128),
-            (128, 128, 255),
+            (192, 255, 0),  # C5
+            (0, 255, 192),  # C6
+            (64, 0, 255),  # C7
+            (255, 0, 64),  # C8/LT
+            (96, 255, 96),  # UT
+            (255, 0, 255),  # MT
+            (255, 128, 0),  # SSN
+            (0, 255, 0),  # AD
+            (0, 128, 255),  # PD
         ]
     ).to(masks.device)
     masks /= 2
     masks[0] += 0.5
     masks = v2.Resize(frame.shape[1:])(masks)
-    frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)  # Overlay the masks on the frame
+    frame = frame * masks[0] + (masks[1:, None] * colors[:, :, None, None]).sum(0)  # Overlay the masks on the frame
     frame = frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
     return frame
 
 
-def convert_to_coco_format(predictions: list) -> list:
-    """
-    Convert predictions to COCO format.
-
-    Args:
-        predictions (list): List of predictions.
-
-    Returns:
-        list: Predictions in COCO format.
-    """
-    coco_predictions = []
-    for masks_pred, image_id in predictions:
-        for i, mask in enumerate(masks_pred):
-            mask = mask > 0.5
-            if np.any(mask):
-                contours, _ = cv2.findContours((mask).astype("uint8"), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                segmentation = []
-                for contour in contours:
-                    contour = contour.flatten().tolist()
-                    if len(contour) > 4:  # COCO format requires at least 3 points (6 values)
-                        segmentation.append(contour)
-                if segmentation:
-                    coco_pred = {"image_id": int(image_id), "category_id": i + 1, "segmentation": segmentation}
-                    coco_predictions.append(coco_pred)
-    return coco_predictions
-
-
 def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
     """
-    Load model weights from a checkpoint.
+    Load model weights from a checkpoint to a specific device.
 
     Args:
         model (torch.nn.Module): Model to load weights into.
@@ -81,7 +54,25 @@ def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
         model_weights[new_key] = model_weights.pop(key)
 
     model.load_state_dict(model_weights)
+    model = model.cuda()
     return model
 
 
-# This file is intentionally left blank.
+def post_processing(masks: torch.Tensor) -> torch.Tensor:
+    """
+    Post-process the segmentation masks.
+    Used only in the test and demo scripts.
+
+    Args:
+        masks (torch.Tensor): Segmentation masks.
+
+    Returns:
+        torch.Tensor: Processed segmentation masks.
+    """
+    masks = torch.nn.Softmax(dim=1)(masks[0])  # drop batch_size dimension
+    masks_suppressed = masks[:, 0] > 0.5
+    masks[masks_suppressed.unsqueeze(1).repeat(1, masks.shape[1], 1, 1)] = 0
+    masks[:, 0][masks_suppressed] = 1
+    del masks_suppressed
+
+    return masks
