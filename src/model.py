@@ -177,6 +177,7 @@ class SegmentationTrainer(L.LightningModule):
                 v2.RandomApply([v2.GaussianNoise()]),
                 v2.RandomApply([v2.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2))]),
                 v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2)]),
+                v2.RandomApply([v2.ElasticTransform()]),
             ]
         )
 
@@ -316,6 +317,12 @@ class SegmentationTrainer(L.LightningModule):
         masks, self.hidden_state = self.model(images, self.hidden_state)
         targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(0, 3, 1, 2)  # Remove the background class
         masks = post_processing(masks)[:, 1:]  # Remove the background class
+
+        # Convert masks to binary by taking argmax and using sum as values
+        masks_argmax = torch.argmax(masks, dim=1, keepdim=True)
+        masks_sum = torch.sum(masks, dim=1, keepdim=True)
+        masks = torch.zeros_like(masks)
+        masks.scatter_(1, masks_argmax, masks_sum)
 
         tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode='multilabel', threshold=0.5)
         self.tp.append(tp)
