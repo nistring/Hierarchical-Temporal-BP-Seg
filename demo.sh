@@ -1,4 +1,4 @@
 python demo.py --input_folder data/SUIT/demo/input/ \
                 --output_folder data/SUIT/demo/output/ \
-                --checkpoint lightning_logs/config7/checkpoints/epoch=32-step=1155.ckpt \
-                --config lightning_logs/config7/config.yaml
+                --checkpoint lightning_logs/config9/checkpoints/epoch=17-step=630.ckpt \
+                --config lightning_logs/config9/config.yaml

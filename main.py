@@ -66,8 +66,9 @@ def main(config, best_model_path=None):
             num_classes=config["model"]["num_classes"],
             temporal_model=config["model"]["temporal_model"],
             image_size=tuple(config["model"]["image_size"]),
-            encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth
-            temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth
+            encoder_depth=config["model"]["encoder_depth"],
+            temporal_depth=config["model"]["temporal_depth"],
+            attention_module=config["model"]["attention_module"],
         ),
         train_dataset,
         val_dataset,
@@ -79,9 +80,12 @@ def main(config, best_model_path=None):
         image_size=tuple(config["model"]["image_size"]),
         truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
         logdir=Path(best_model_path).parent.parent if best_model_path else best_model_path,
-        alpha=config["model"]["alpha"],  # Pass alpha to the trainer
-        encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth to the trainer
-        temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth to the trainer
+        alpha=config["model"]["alpha"],
+        encoder_depth=config["model"]["encoder_depth"],
+        temporal_depth=config["model"]["temporal_depth"],
+        temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),
+        lora=config["model"].get("use_lora", False),  # Add LoRA parameter
+        lora_r=config["model"].get("lora_r", 4),  # Add LoRA rank parameter
     )
 
     # Set torch precision for matrix multiplication
@@ -95,7 +99,8 @@ def main(config, best_model_path=None):
 
     # Initialize the trainer
     trainer = L.Trainer(
-        strategy=DDPStrategy(),#find_unused_parameters=True),
+        # strategy=DDPStrategy(),
+        strategy="ddp_find_unused_parameters_true",
         max_epochs=config["trainer"]["max_epochs"],
         devices=1 if test else config["trainer"]["gpus"],
         callbacks=[

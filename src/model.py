@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import math
 
 import matplotlib.pyplot as plt
 import segmentation_models_pytorch as smp
@@ -9,21 +10,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from torchvision import tv_tensors
-from torchvision.transforms.functional import to_pil_image
+from torchvision.transforms.functional import to_pil_image, pil_to_tensor
 from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 import segmentation_models_pytorch as smp
 
 import sys
+import yaml
 
 sys.path.append("./")
 from src.convgru import ConvGRU
 from src.convlstm import ConvLSTM
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
+from src.attention import ECANet, SimAM  # Import the attention modules
+from src.losses import TemporalConsistencyLoss  # Import the new losses
+from src.lora import CustomLoRA
 
 class TemporalSegmentationModel(nn.Module):
-    def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size, temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1):
+    def __init__(
+        self,
+        encoder_name,
+        segmentation_model_name,
+        num_classes,
+        image_size,
+        temporal_model="ConvLSTM",
+        num_layers=1,
+        encoder_depth=5,
+        temporal_depth=1,
+        attention_module=None,
+    ):
         """
         Initialize the TemporalSegmentationModel.
 
@@ -36,6 +52,7 @@ class TemporalSegmentationModel(nn.Module):
             num_layers (int): Number of layers in the temporal model. Default is 1.
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
+            attention_module (str): Type of attention module. Default is None.
         """
         super().__init__()
         assert encoder_depth >= temporal_depth, "Encoder depth should be greater than or equal to temporal depth."
@@ -43,6 +60,7 @@ class TemporalSegmentationModel(nn.Module):
         model = getattr(smp, segmentation_model_name)(
             encoder_name=encoder_name, encoder_weights="imagenet", classes=num_classes + 1, in_channels=1, encoder_depth=encoder_depth
         )
+        
         self.encoder = model.encoder
         self.decoder = model.decoder
         self.head = model.segmentation_head
@@ -79,6 +97,18 @@ class TemporalSegmentationModel(nn.Module):
             else:
                 raise ValueError("Unsupported temporal model type. Choose from 'ConvLSTM' or 'ConvGRU'.")
 
+        # Initialize attention modules as ModuleList if needed
+        if attention_module == "ECA":
+            self.attention = nn.ModuleList()
+            # Create ECANet for each output feature from encoder and temporal models
+            for i in range(len(self.temporal_models)):
+                self.attention.append(ECANet())
+        elif attention_module == "SimAM":
+            # SimAM doesn't require channel info
+            self.attention = SimAM()
+        else:
+            self.attention = None
+
     def forward(self, x, hidden_state=None):
         """
         Forward pass of the model.
@@ -98,7 +128,7 @@ class TemporalSegmentationModel(nn.Module):
         features = self.encoder(x)
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in features]
 
-        temporal_outs = features[:-len(self.temporal_models)]
+        temporal_outs = features[: -len(self.temporal_models)]
 
         if hidden_state is None:
             hidden_state = [None] * len(self.temporal_models)
@@ -109,12 +139,22 @@ class TemporalSegmentationModel(nn.Module):
             temporal_outs.append(temporal_out)
         temporal_outs = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_outs]
 
+        # Apply attention module if specified
+        if self.attention is not None:
+            # Apply corresponding ECANet to each feature map
+            for i in range(len(self.temporal_models)):
+                if isinstance(self.attention, nn.ModuleList):
+                    temporal_outs[i - len(self.temporal_models)] = self.attention[i](temporal_outs[i - len(self.temporal_models)])
+                else:
+                    temporal_outs[i - len(self.temporal_models)] = self.attention(temporal_outs[i - len(self.temporal_models)])
+
         # Decode the features to get the segmentation output
         x = self.decoder(temporal_outs)
         x = self.head(x)
         x = x.reshape(batch_size, seq_len, *x.shape[1:])
 
         return x, hidden_state
+
 
 class SegmentationTrainer(L.LightningModule):
     def __init__(
@@ -133,6 +173,9 @@ class SegmentationTrainer(L.LightningModule):
         alpha=0.5,  # Add alpha parameter
         encoder_depth=5,  # Add encoder_depth parameter
         temporal_depth=1,  # Add temporal_depth parameter
+        temporal_loss_weight=0.3,  # Weight for temporal consistency loss
+        lora=False,  # Added lora parameter
+        lora_r=4,  # Added lorar parameter
     ):
         """
         Initialize the SegmentationTrainer.
@@ -152,6 +195,9 @@ class SegmentationTrainer(L.LightningModule):
             alpha (float): Coefficient for CrossEntropy loss. Default is 0.5.
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
+            temporal_loss_weight (float): Weight for temporal consistency loss. Default is 0.3.
+            lora (bool): Whether to use LoRA. Default is False.
+            lora_r (int): Rank for LoRA adaptation. Default is 4.
         """
         super().__init__()
         self.model = model
@@ -165,27 +211,32 @@ class SegmentationTrainer(L.LightningModule):
         self.image_size = image_size
         self.truncated_bptt_steps = truncated_bptt_steps
         self.logdir = logdir
-        self.alpha = alpha  # Set alpha
-        self.encoder_depth = encoder_depth  # Set encoder_depth
-        self.temporal_depth = temporal_depth  # Set temporal_depth
+        self.alpha = alpha
+        self.encoder_depth = encoder_depth
+        self.temporal_depth = temporal_depth
+        self.temporal_loss_weight = temporal_loss_weight
+        self.lora = lora
+        self.lora_r = lora_r
 
         # Define data augmentation transforms
         self.transform = v2.Compose(
             [
-                v2.RandomApply([v2.RandomAffine(degrees=0, translate=(0.15, 0.05), scale=(0.9, 1.1), shear=0.1)]),
-                v2.RandomApply([v2.RandomResizedCrop(image_size, scale=(0.8, 1.0), ratio=(0.8, 1.25))]),
+                v2.RandomApply([v2.RandomAffine(degrees=15, translate=(0.2, 0.1), scale=(0.85, 1.15), shear=0.15)]),
+                v2.RandomPerspective(distortion_scale=0.15),
+                v2.RandomApply([v2.RandomResizedCrop(image_size, scale=(0.7, 1.0), ratio=(3 / 4, 4 / 3))]),
                 v2.RandomApply([v2.GaussianNoise()]),
                 v2.RandomApply([v2.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2))]),
-                v2.RandomApply([v2.ColorJitter(brightness=0.2, contrast=0.2)]),
+                v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3)]),
                 v2.RandomApply([v2.ElasticTransform()]),
             ]
         )
 
+        # Initialize loss functions
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
         self.loss_crossentropy = nn.CrossEntropyLoss()
-        self.alpha = alpha  # Coefficient for CrossEntropy loss
+        self.loss_temporal = TemporalConsistencyLoss()
 
-    def show_batch(self, win_size=(50, 25), save=True):
+    def show_batch(self, win_size=(80, 100), save=True):
         """
         Show a batch of images and masks.
 
@@ -193,6 +244,7 @@ class SegmentationTrainer(L.LightningModule):
             win_size (tuple): Window size for displaying images.
             save (bool): Whether to save the images. Default is True.
         """
+
         def _to_vis(imgs, masks):
             imgs = imgs.reshape(-1, *imgs.shape[2:]).cpu()  # Flatten the batch and sequence dimensions
             masks = masks.reshape(-1, 1, *targets["masks"].shape[2:]).bool().float().cpu()
@@ -215,17 +267,25 @@ class SegmentationTrainer(L.LightningModule):
         imgs, targets = next(iter(train_dataloader))
         masks = targets["masks"]
         imgs_aug, masks_aug = imgs.clone(), masks.clone()
-        
+
+        preprocess = v2.Compose(
+            [
+                v2.ToImage(),
+                v2.Resize(self.image_size),
+                v2.ToDtype(torch.float32, scale=True),
+            ]
+        )
         # Apply data augmentation transforms
         for i, (img, mask) in enumerate(zip(imgs, masks)):
-            imgs_aug[i], masks_aug[i] = self.transform(img, tv_tensors.Mask(mask))  # apply transforms
+            imgs[i], masks[i] = preprocess(img, tv_tensors.Mask(mask))
+            imgs_aug[i], masks_aug[i] = self.transform(imgs[i], masks[i])  # apply transforms
 
         original_images = _to_vis(imgs, masks)
         augmented_images = _to_vis(imgs_aug, masks_aug)
 
         def _plot_images(images, filename):
             plt.figure(figsize=win_size)
-            grid = torchvision.utils.make_grid([torchvision.transforms.ToTensor()(img) for img in images], nrow=self.sequence_length)
+            grid = torchvision.utils.make_grid(list(map(pil_to_tensor, images)), nrow=self.sequence_length)
             plt.imshow(grid.permute(1, 2, 0))
             plt.axis("off")
             if save:
@@ -273,16 +333,25 @@ class SegmentationTrainer(L.LightningModule):
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
 
+        # Keep the original shape for temporal consistency loss
+        masks_original = masks
+
         masks = masks.reshape(-1, *masks.shape[2:])  # Flatten the batch and sequence dimensions
         targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:]).long()  # Flatten the batch and sequence dimensions
-        
+
         loss_tversky = self.loss_tversky(masks, targets)
         loss_crossentropy = self.loss_crossentropy(masks, targets)
-        loss = loss_tversky + self.alpha * loss_crossentropy
+        loss_temporal = self.loss_temporal(masks_original)
 
+        # Combine all losses
+        loss = loss_tversky + self.alpha * loss_crossentropy + self.temporal_loss_weight * loss_temporal
+
+        # Log each component of the loss
         self.log(f"{stage}_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_tversky", loss_tversky, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_crossentropy", loss_crossentropy, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss_temporal", loss_temporal, on_step=False, on_epoch=True, sync_dist=True)
+
         return loss
 
     def on_train_batch_start(self, batch, batch_idx):
@@ -293,9 +362,17 @@ class SegmentationTrainer(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         return self.compute_loss(batch, batch_idx, "train")
-    
+
+    def on_train_epoch_start(self):
+        if self.lora:
+            # self.model.encoder = apply_lora_to_model(self.model.encoder, self.lora_r, self.lora_alpha, self.lora_dropout).to(self.device)
+            self.model.encoder = CustomLoRA.from_module(self.model.encoder, rank=self.lora_r)
+
     def on_train_epoch_end(self):
         self.train_dataset._create_img_list()
+        if self.lora:
+            # self.model.encoder = merge_lora_weights(self.model.encoder)
+            self.model.encoder.merge_lora(inplace=True)
 
     def on_validation_epoch_start(self):
         self.hidden_state = None
@@ -315,7 +392,9 @@ class SegmentationTrainer(L.LightningModule):
             self.hidden_state = None
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
-        targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(0, 3, 1, 2)  # Remove the background class
+        targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(
+            0, 3, 1, 2
+        )  # Remove the background class
         masks = post_processing(masks)[:, 1:]  # Remove the background class
 
         # Convert masks to binary by taking argmax and using sum as values
@@ -324,7 +403,7 @@ class SegmentationTrainer(L.LightningModule):
         masks = torch.zeros_like(masks)
         masks.scatter_(1, masks_argmax, masks_sum)
 
-        tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode='multilabel', threshold=0.5)
+        tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode="multilabel", threshold=0.5)
         self.tp.append(tp)
         self.fp.append(fp)
         self.fn.append(fn)
@@ -341,7 +420,7 @@ class SegmentationTrainer(L.LightningModule):
         f1_score = smp.metrics.f1_score(self.tp, self.fp, self.fn, self.tn)
         overall_score = 0.5 * (iou_score + f1_score)
         seq_obj_appear_sum = seq_obj_appear.sum(0)
-        
+
         iou_score = ((iou_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
         f1_score = ((f1_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
         overall_score = ((overall_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
@@ -363,63 +442,53 @@ class SegmentationTrainer(L.LightningModule):
         with open(logdir / "test_results.json", "w") as f:
             json.dump(results, f, indent=4)
 
+
 if __name__ == "__main__":
     from pathlib import Path
 
     # Sample configuration
-    config = {
-        "model": {
-            "encoder_name": "resnet34",
-            "segmentation_model_name": "Unet",
-            "num_classes": 10,
-            "temporal_model": "ConvGRU",
-            "sequence_length": 10,
-            "image_size": [480, 640],
-            "truncated_bptt_steps": 10,
-        },
-        "data": {
-            "train_data_path": "./data/SUIT/images/train",
-            "train_annotations_path": "./data/SUIT/coco_annotations/train_updated.json",
-            "batch_size": 8,
-            "num_workers": 12,
-        },
-    }
+    with open("configs/config8.yaml", "r") as f:
+        config = yaml.safe_load(f)
 
-    # Create datasets
+    # Initialize datasets
     train_dataset = UltrasoundTrainDataset(
         Path(config["data"]["train_data_path"]),
         Path(config["data"]["train_annotations_path"]),
-        sequence_length=config["model"]["sequence_length"],
+        sequence_length=8,
         image_size=tuple(config["model"]["image_size"]),
-        batch_size=config["data"]["batch_size"],
+        batch_size=10,
         truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
     )
 
-    # Create model
-    model = TemporalSegmentationModel(
-        encoder_name=config["model"]["encoder_name"],
-        segmentation_model_name=config["model"]["segmentation_model_name"],
-        num_classes=config["model"]["num_classes"],
-        temporal_model=config["model"]["temporal_model"],
-        image_size=tuple(config["model"]["image_size"]),
-    )
-
-    # Print model size
-    model.print_model_size()
-
-    # Create trainer
-    trainer = SegmentationTrainer(
-        model=model,
-        train_dataset=train_dataset,
-        val_dataset=None,
-        test_dataset=None,
-        batch_size=config["data"]["batch_size"],
-        learning_rate=1e-3,
+    # Initialize the model and trainer
+    model = SegmentationTrainer(
+        TemporalSegmentationModel(
+            encoder_name=config["model"]["encoder_name"],
+            segmentation_model_name=config["model"]["segmentation_model_name"],
+            num_classes=config["model"]["num_classes"],
+            temporal_model=config["model"]["temporal_model"],
+            image_size=tuple(config["model"]["image_size"]),
+            encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth
+            temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth
+            attention_module=config["model"]["attention_module"],  # Pass attention_module
+        ),
+        train_dataset,
+        None,
+        None,
+        batch_size=10,
+        learning_rate=config["model"]["learning_rate"],
         num_workers=config["data"]["num_workers"],
+        sequence_length=8,
         image_size=tuple(config["model"]["image_size"]),
-        sequence_length=config["model"]["sequence_length"],
         truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
+        logdir=None,
+        alpha=config["model"]["alpha"],  # Pass alpha to the trainer
+        encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth to the trainer
+        temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth to the trainer
+        temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),  # Keep temporal_loss_weight
+        lora=config["model"].get("use_lora", False),  # Pass lora to the trainer
+        lora_r=config["model"].get("lora_r", 4),  # Pass lora_r to the trainer
     )
 
     # Show batch
-    trainer.show_batch()
+    model.show_batch()

@@ -71,6 +71,7 @@ def main(
     temporal_model="ConvGRU",
     image_size=(480, 640),
     temporal_depth=1,  # Add temporal_depth parameter
+    attention_module=None,
 ):
     """
     Main function to process video stream and perform segmentation.
@@ -89,7 +90,7 @@ def main(
     # Load the model with the specified parameters and checkpoint
     model = load_model(
         TemporalSegmentationModel(
-            encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth
+            encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth, attention_module=attention_module
         ),
         checkpoint_path,
     )
@@ -133,4 +134,5 @@ if __name__ == "__main__":
         config["model"].get("temporal_model", "ConvGRU"),
         tuple(config["model"].get("image_size", (480, 640))),
         config["model"].get("temporal_depth", 1),  # Add temporal_depth parameter
+        config["model"].get("attention_module", None),
     )
