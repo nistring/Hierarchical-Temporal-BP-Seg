@@ -23,9 +23,7 @@ from src.convgru import ConvGRU
 from src.convlstm import ConvLSTM
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
-from src.attention import ECANet, SimAM  # Import the attention modules
 from src.losses import TemporalConsistencyLoss  # Import the new losses
-from src.lora import CustomLoRA
 
 class TemporalSegmentationModel(nn.Module):
     def __init__(
@@ -38,7 +36,7 @@ class TemporalSegmentationModel(nn.Module):
         num_layers=1,
         encoder_depth=5,
         temporal_depth=1,
-        attention_module=None,
+        freeze_encoder=False,
     ):
         """
         Initialize the TemporalSegmentationModel.
@@ -52,7 +50,7 @@ class TemporalSegmentationModel(nn.Module):
             num_layers (int): Number of layers in the temporal model. Default is 1.
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
-            attention_module (str): Type of attention module. Default is None.
+            freeze_encoder (bool): Whether to freeze the encoder weights. Default is False.
         """
         super().__init__()
         assert encoder_depth >= temporal_depth, "Encoder depth should be greater than or equal to temporal depth."
@@ -64,6 +62,9 @@ class TemporalSegmentationModel(nn.Module):
         self.encoder = model.encoder
         self.decoder = model.decoder
         self.head = model.segmentation_head
+
+        # Freeze encoder weights if specified
+        self.freeze_encoder = freeze_encoder
 
         self.temporal_models = nn.ModuleList()
         h, w = image_size
@@ -97,18 +98,6 @@ class TemporalSegmentationModel(nn.Module):
             else:
                 raise ValueError("Unsupported temporal model type. Choose from 'ConvLSTM' or 'ConvGRU'.")
 
-        # Initialize attention modules as ModuleList if needed
-        if attention_module == "ECA":
-            self.attention = nn.ModuleList()
-            # Create ECANet for each output feature from encoder and temporal models
-            for i in range(len(self.temporal_models)):
-                self.attention.append(ECANet())
-        elif attention_module == "SimAM":
-            # SimAM doesn't require channel info
-            self.attention = SimAM()
-        else:
-            self.attention = None
-
     def forward(self, x, hidden_state=None):
         """
         Forward pass of the model.
@@ -125,28 +114,29 @@ class TemporalSegmentationModel(nn.Module):
         x = x.reshape(batch_size * seq_len, c, h, w)
 
         # Extract features using the encoder
-        features = self.encoder(x)
+        if self.freeze_encoder:
+            with torch.no_grad():
+                features = self.encoder(x)
+        else:
+            features = self.encoder(x)
+
+        
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in features]
 
-        temporal_outs = features[: -len(self.temporal_models)]
+        if not self.temporal_models:  # Skip temporal processing if there are no temporal models
+            temporal_outs = features
+        else:
+            temporal_outs = features[: -len(self.temporal_models)]
+            
+            if hidden_state is None:
+                hidden_state = [None] * len(self.temporal_models)
+            
+            # Apply temporal models to the features
+            for i, temporal_model in enumerate(self.temporal_models):
+                temporal_out, hidden_state[i] = temporal_model(features[i - len(self.temporal_models)], hidden_state[i])
+                temporal_outs.append(temporal_out)
 
-        if hidden_state is None:
-            hidden_state = [None] * len(self.temporal_models)
-
-        # Apply temporal models to the features
-        for i, temporal_model in enumerate(self.temporal_models):
-            temporal_out, hidden_state[i] = temporal_model(features[i - len(self.temporal_models)], hidden_state[i])
-            temporal_outs.append(temporal_out)
         temporal_outs = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_outs]
-
-        # Apply attention module if specified
-        if self.attention is not None:
-            # Apply corresponding ECANet to each feature map
-            for i in range(len(self.temporal_models)):
-                if isinstance(self.attention, nn.ModuleList):
-                    temporal_outs[i - len(self.temporal_models)] = self.attention[i](temporal_outs[i - len(self.temporal_models)])
-                else:
-                    temporal_outs[i - len(self.temporal_models)] = self.attention(temporal_outs[i - len(self.temporal_models)])
 
         # Decode the features to get the segmentation output
         x = self.decoder(temporal_outs)
@@ -174,8 +164,6 @@ class SegmentationTrainer(L.LightningModule):
         encoder_depth=5,  # Add encoder_depth parameter
         temporal_depth=1,  # Add temporal_depth parameter
         temporal_loss_weight=0.3,  # Weight for temporal consistency loss
-        lora=False,  # Added lora parameter
-        lora_r=4,  # Added lorar parameter
     ):
         """
         Initialize the SegmentationTrainer.
@@ -196,8 +184,6 @@ class SegmentationTrainer(L.LightningModule):
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
             temporal_loss_weight (float): Weight for temporal consistency loss. Default is 0.3.
-            lora (bool): Whether to use LoRA. Default is False.
-            lora_r (int): Rank for LoRA adaptation. Default is 4.
         """
         super().__init__()
         self.model = model
@@ -215,17 +201,14 @@ class SegmentationTrainer(L.LightningModule):
         self.encoder_depth = encoder_depth
         self.temporal_depth = temporal_depth
         self.temporal_loss_weight = temporal_loss_weight
-        self.lora = lora
-        self.lora_r = lora_r
 
         # Define data augmentation transforms
         self.transform = v2.Compose(
             [
-                v2.RandomApply([v2.RandomAffine(degrees=15, translate=(0.2, 0.1), scale=(0.85, 1.15), shear=0.15)]),
-                v2.RandomPerspective(distortion_scale=0.15),
-                v2.RandomApply([v2.RandomResizedCrop(image_size, scale=(0.7, 1.0), ratio=(3 / 4, 4 / 3))]),
+                v2.RandomApply([v2.RandomAffine(degrees=0, translate=(0.2, 0.1), scale=(0.85, 1.15), shear=0.15)]),
+                v2.RandomApply([v2.RandomResizedCrop(image_size, scale=(0.75, 1.0), ratio=(3 / 4, 4 / 3))]),
                 v2.RandomApply([v2.GaussianNoise()]),
-                v2.RandomApply([v2.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2))]),
+                v2.RandomApply([v2.GaussianBlur(kernel_size=(7, 7), sigma=(0.1, 2))]),
                 v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3)]),
                 v2.RandomApply([v2.ElasticTransform()]),
             ]
@@ -326,7 +309,8 @@ class SegmentationTrainer(L.LightningModule):
         return DataLoader(self.test_dataset, batch_size=1, num_workers=self.num_workers, pin_memory=True)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        return optimizer
 
     def compute_loss(self, batch, batch_idx, stage):
         images, targets = batch
@@ -338,16 +322,16 @@ class SegmentationTrainer(L.LightningModule):
 
         masks = masks.reshape(-1, *masks.shape[2:])  # Flatten the batch and sequence dimensions
         targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:]).long()  # Flatten the batch and sequence dimensions
-
         loss_tversky = self.loss_tversky(masks, targets)
         loss_crossentropy = self.loss_crossentropy(masks, targets)
         loss_temporal = self.loss_temporal(masks_original)
 
         # Combine all losses
-        loss = loss_tversky + self.alpha * loss_crossentropy + self.temporal_loss_weight * loss_temporal
+        loss_log = loss_tversky + self.alpha * loss_crossentropy + self.temporal_loss_weight * loss_temporal
+        loss = masks.shape[0] * loss_log - masks_original.shape[0] * self.temporal_loss_weight * loss_temporal
 
         # Log each component of the loss
-        self.log(f"{stage}_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss", loss_log, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_tversky", loss_tversky, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_crossentropy", loss_crossentropy, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_temporal", loss_temporal, on_step=False, on_epoch=True, sync_dist=True)
@@ -357,22 +341,16 @@ class SegmentationTrainer(L.LightningModule):
     def on_train_batch_start(self, batch, batch_idx):
         if batch_idx % self.truncated_bptt_steps == 0:
             self.hidden_state = None
-        else:
+        elif self.temporal_depth > 0:
+            # Detach the hidden state to prevent backpropagation through the entire sequence
+            # This is important for truncated backpropagation
             self.hidden_state = [[h.detach() for h in hidden_state] for hidden_state in self.hidden_state]
 
     def training_step(self, batch, batch_idx):
         return self.compute_loss(batch, batch_idx, "train")
 
-    def on_train_epoch_start(self):
-        if self.lora:
-            # self.model.encoder = apply_lora_to_model(self.model.encoder, self.lora_r, self.lora_alpha, self.lora_dropout).to(self.device)
-            self.model.encoder = CustomLoRA.from_module(self.model.encoder, rank=self.lora_r)
-
     def on_train_epoch_end(self):
         self.train_dataset._create_img_list()
-        if self.lora:
-            # self.model.encoder = merge_lora_weights(self.model.encoder)
-            self.model.encoder.merge_lora(inplace=True)
 
     def on_validation_epoch_start(self):
         self.hidden_state = None
@@ -383,6 +361,8 @@ class SegmentationTrainer(L.LightningModule):
     def on_test_start(self):
         self.tp, self.fp, self.fn, self.tn = [], [], [], []
         self.video_id = None
+        # Get the base name of data_dir for the results filename
+        self.test_dataset_name = Path(self.test_dataset.data_dir).name
 
     def test_step(self, batch):
         images, targets = batch
@@ -439,15 +419,19 @@ class SegmentationTrainer(L.LightningModule):
         }
 
         logdir = Path(self.logdir)
-        with open(logdir / "test_results.json", "w") as f:
+        # Use the test dataset name for the results file
+        results_filename = f"test_results_{self.test_dataset_name}.json"
+        with open(logdir / results_filename, "w") as f:
             json.dump(results, f, indent=4)
+        
+        print(f"Test results saved to {logdir / results_filename}")
 
 
 if __name__ == "__main__":
     from pathlib import Path
 
     # Sample configuration
-    with open("configs/config8.yaml", "r") as f:
+    with open("configs/config19.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     # Initialize datasets
@@ -470,7 +454,7 @@ if __name__ == "__main__":
             image_size=tuple(config["model"]["image_size"]),
             encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth
             temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth
-            attention_module=config["model"]["attention_module"],  # Pass attention_module
+            freeze_encoder=config["model"].get("freeze_encoder", False),  # Pass freeze_encoder
         ),
         train_dataset,
         None,
@@ -486,8 +470,6 @@ if __name__ == "__main__":
         encoder_depth=config["model"]["encoder_depth"],  # Pass encoder_depth to the trainer
         temporal_depth=config["model"]["temporal_depth"],  # Pass temporal_depth to the trainer
         temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),  # Keep temporal_loss_weight
-        lora=config["model"].get("use_lora", False),  # Pass lora to the trainer
-        lora_r=config["model"].get("lora_r", 4),  # Pass lora_r to the trainer
     )
 
     # Show batch

@@ -16,12 +16,38 @@ category_match = {
     3: 3,
     4: 4,
     5: 5,
-    6: 6,
+    6: 3, # MT -> C7
     7: 4, # LT -> C8
-    8: 7,
-    9: 8,
-    10: 9,
+    8: 6,
+    9: 7,
+    10: 8,
 }
+
+# category_match = {
+#     1: 1,
+#     2: 2,
+#     3: 3,
+#     4: 4,
+#     5: 5,
+#     6: 3, # MT -> C7
+#     7: 4, # LT -> C8
+#     8: 5,
+#     9: 5,
+#     10: 5,
+# }
+
+# category_match = {
+#     1: 1,
+#     2: 1,
+#     3: 2,
+#     4: 3,
+#     5: 1,
+#     6: 2, # MT -> C7
+#     7: 3, # LT -> C8
+#     8: 1,
+#     9: 1,
+#     10: 1,
+# }
 
 class BaseUltrasoundDataset(Dataset):
     def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, batch_size: int):

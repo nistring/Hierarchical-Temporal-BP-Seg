@@ -1,8 +1,6 @@
-import cv2
 import torch
 from torchvision.transforms import v2
 import numpy as np
-
 
 def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     """
@@ -31,7 +29,7 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     masks /= 2
     masks[0] += 0.5
     masks = v2.Resize(frame.shape[1:])(masks)
-    frame = frame * masks[0] + (masks[1:, None] * colors[:, :, None, None]).sum(0)  # Overlay the masks on the frame
+    frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)  # Overlay the masks on the frame
     frame = frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
     return frame
 
@@ -47,7 +45,7 @@ def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
     Returns:
         torch.nn.Module: Model with loaded weights.
     """
-    model_weights = torch.load(checkpoint_path, weights_only=True)["state_dict"]
+    model_weights = torch.load(checkpoint_path)["state_dict"]
     # update keys by dropping `model.` only once
     for key in list(model_weights):
         new_key = key.replace("model.", "", 1)

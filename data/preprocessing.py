@@ -3,21 +3,24 @@ import os
 import xml.etree.ElementTree as ET
 import json
 
-thresh_binary = 1
+thresh_binary = 20
 kernel_size = 8
 vid_root = "raw/videos"
 
 
-def crop(frame):
+def crop(frame, roi=None):
     """
     Crop the frame to the bounding box of the largest contour.
 
     Args:
         frame (numpy.ndarray): The input video frame.
+        roi (tuple): The region of interest (x, y, w, h) to crop the frame.
 
     Returns:
         tuple: The bounding box (x, y, w, h) of the largest contour.
     """
+    if roi is not None:
+        frame = frame[roi[1] : roi[1] + roi[3], roi[0] : roi[0] + roi[2]]
     original_img = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
     img = cv2.threshold(original_img, thresh_binary, 255, cv2.THRESH_TOZERO)[1]
@@ -25,10 +28,14 @@ def crop(frame):
     contours, _ = cv2.findContours(ret, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(contour)
+    if roi is not None:
+        x += roi[0]
+        y += roi[1]
+
     return (x, y, w, h)
 
 
-def crop_vid(name):
+def crop_vid(name, roi=None):
     """
     Crop the video to the bounding box of the largest contour in the first frame.
 
@@ -43,7 +50,9 @@ def crop_vid(name):
         if not ret:
             break
         if bbox is None:
-            bbox = crop(frame)
+            bbox = crop(frame, roi)
+            if name == "00610090.mp4":
+                bbox = (639, 130, 819, 747)
             out = cv2.VideoWriter(f"SUIT/demo/input/{name}", fourcc, cap.get(cv2.CAP_PROP_FPS), (bbox[2], bbox[3]))
         out.write(frame[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]])
     cap.release()
@@ -51,16 +60,17 @@ def crop_vid(name):
     print(name, "done")
 
 
-def preprocess(is_vid_train_frame=False):
+def preprocess(anno_root, roi=None):
     """
     Preprocess the video frames and annotations.
 
     Args:
         is_vid_train_frame (bool): Flag to indicate if the frames are for training or validation.
     """
-    anno_root = "raw/anno/train" if is_vid_train_frame else "raw/anno/val"
-    ann_file = "SUIT/coco_annotations/train.json" if is_vid_train_frame else "SUIT/coco_annotations/val.json"
-    save_dir = "SUIT/images/train" if is_vid_train_frame else "SUIT/images/val"
+    anno_dir = anno_root.split("/")[-1]
+    is_vid_train_frame = anno_dir == "train"
+    ann_file = f"SUIT/coco_annotations/{anno_dir}.json"
+    save_dir = f"SUIT/images/{anno_dir}"
     os.makedirs(save_dir, exist_ok=True)
 
     categories = [
@@ -84,6 +94,7 @@ def preprocess(is_vid_train_frame=False):
         root = tree.getroot()
         name = anno_dir + ".mp4"
         first_frame_img_id = img_id
+        print(name)
 
         videos.append(dict(id=vid_id, name=name))
 
@@ -95,7 +106,9 @@ def preprocess(is_vid_train_frame=False):
             if not ret:
                 break
             if bbox is None:
-                bbox = crop(frame)
+                bbox = crop(frame, roi)
+                if anno_dir == "00610090":
+                    bbox = (639, 130, 819, 747)
             file_name = f"image_{img_id}.png"
             cv2.imwrite(os.path.join(save_dir, file_name), frame[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]])
             images.append(dict(file_name=file_name, height=bbox[3], width=bbox[2], id=img_id, video_id=vid_id, frame_id=frame_id))
@@ -133,7 +146,12 @@ def preprocess(is_vid_train_frame=False):
 
 
 if __name__ == "__main__":
-    preprocess(True)
-    # preprocess(False)
+    # preprocess("raw/anno/GE", roi=(500, 100, 1100, 800))
+    # preprocess("raw/anno/mindray")
+
     # for i in range(51, 76):
     #     crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")
+    for vid in os.listdir("raw/anno/mindray"):
+        crop_vid(vid + ".mp4")
+    for vid in os.listdir("raw/anno/GE"):
+        crop_vid(vid + ".mp4", roi=(500, 100, 1100, 800))

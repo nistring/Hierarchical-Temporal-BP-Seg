@@ -90,7 +90,7 @@ def main(
     # Load the model with the specified parameters and checkpoint
     model = load_model(
         TemporalSegmentationModel(
-            encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth, attention_module=attention_module
+            encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth,
         ),
         checkpoint_path,
     )

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback, StochasticWeightAveraging
 from src.data_loader import UltrasoundTestDataset, UltrasoundTrainDataset
 from src.model import TemporalSegmentationModel, SegmentationTrainer
 import yaml
@@ -51,8 +51,8 @@ def main(config, best_model_path=None):
         train=False,
     )
     test_dataset = UltrasoundTestDataset(
-        Path(config["data"]["val_data_path"]),
-        Path(config["data"]["val_annotations_path"]),
+        Path(config["data"]["test_data_path"]),
+        Path(config["data"]["test_annotations_path"]),
         sequence_length=config["model"]["sequence_length"],
         image_size=tuple(config["model"]["image_size"]),
         batch_size=1,
@@ -68,7 +68,7 @@ def main(config, best_model_path=None):
             image_size=tuple(config["model"]["image_size"]),
             encoder_depth=config["model"]["encoder_depth"],
             temporal_depth=config["model"]["temporal_depth"],
-            attention_module=config["model"]["attention_module"],
+            freeze_encoder=config["model"].get("freeze_encoder", False),  # Get freeze_encoder from config
         ),
         train_dataset,
         val_dataset,
@@ -84,8 +84,6 @@ def main(config, best_model_path=None):
         encoder_depth=config["model"]["encoder_depth"],
         temporal_depth=config["model"]["temporal_depth"],
         temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),
-        lora=config["model"].get("use_lora", False),  # Add LoRA parameter
-        lora_r=config["model"].get("lora_r", 4),  # Add LoRA rank parameter
     )
 
     # Set torch precision for matrix multiplication
@@ -107,6 +105,7 @@ def main(config, best_model_path=None):
             checkpoint_callback,
             LearningRateMonitor(logging_interval="step"),
             save_config_callback,
+            StochasticWeightAveraging(swa_lrs=0.2 * config["model"]["learning_rate"]),
         ],
         precision="bf16-mixed",
         sync_batchnorm=True,
@@ -127,6 +126,8 @@ if __name__ == "__main__":
     parser.add_argument("--config_file", type=str, help="Path to the configuration file.")
     parser.add_argument("--mode", type=str, choices=["train", "test"], default="train", help="Mode to run: train or test.")
     parser.add_argument("--best_model_path", type=str, help="Path to the best model checkpoint for testing.")
+    parser.add_argument("--test_data_path", type=str, help="Path to the test data directory.")
+    parser.add_argument("--test_annotations_path", type=str, help="Path to the test annotations file.")
     args = parser.parse_args()
     
     # Load configuration from file
@@ -137,4 +138,15 @@ if __name__ == "__main__":
     config["mode"] = args.mode
     if args.best_model_path:
         config["best_model_path"] = args.best_model_path
+    
+    # Override test paths if provided
+    if args.test_data_path and args.test_annotations_path:
+        config["data"]["test_data_path"] = args.test_data_path
+        config["data"]["test_annotations_path"] = args.test_annotations_path
+    elif args.test_data_path or args.test_annotations_path:
+        raise ValueError("Both test_data_path and test_annotations_path must be provided.")
+    else:
+        config["data"]["test_data_path"] = config["data"]["val_data_path"]
+        config["data"]["test_annotations_path"] = config["data"]["val_annotations_path"]
+        
     main(config, best_model_path=args.best_model_path)
