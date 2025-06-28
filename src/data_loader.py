@@ -1,5 +1,6 @@
 import random
 from typing import Optional, List, Iterator
+import math
 
 import torch
 from torch.utils.data import Dataset
@@ -22,32 +23,6 @@ category_match = {
     9: 7,
     10: 8,
 }
-
-# category_match = {
-#     1: 1,
-#     2: 2,
-#     3: 3,
-#     4: 4,
-#     5: 5,
-#     6: 3, # MT -> C7
-#     7: 4, # LT -> C8
-#     8: 5,
-#     9: 5,
-#     10: 5,
-# }
-
-# category_match = {
-#     1: 1,
-#     2: 1,
-#     3: 2,
-#     4: 3,
-#     5: 1,
-#     6: 2, # MT -> C7
-#     7: 3, # LT -> C8
-#     8: 1,
-#     9: 1,
-#     10: 1,
-# }
 
 class BaseUltrasoundDataset(Dataset):
     def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, batch_size: int):
@@ -184,7 +159,7 @@ class UltrasoundTrainDataset(BaseUltrasoundDataset):
     def __getitem__(self, idx: int) -> tuple:
         video_id, img_ids = self.img_list[idx]
         images, masks = self._load_images_and_masks(img_ids)
-        return images, {"masks": masks}
+        return images, {"masks": masks, "idx":idx}
 
 
 class UltrasoundTestDataset(BaseUltrasoundDataset):
@@ -219,7 +194,7 @@ class UltrasoundTestDataset(BaseUltrasoundDataset):
 
 
 class DistributedVideoSampler(DistributedSampler):
-    def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None, shuffle: bool = True, seed: int = 0, drop_last: bool = False) -> None:
+    def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None, shuffle: bool = False, seed: int = 0, drop_last: bool = False, batch_size: int = 1) -> None:
         """
         Initialize the DistributedVideoSampler.
 
@@ -227,13 +202,19 @@ class DistributedVideoSampler(DistributedSampler):
             dataset (Dataset): Dataset to be sampled.
             num_replicas (Optional[int]): Number of replicas. Default is None.
             rank (Optional[int]): Rank of the current process. Default is None.
-            shuffle (bool): Whether to shuffle the data. Default is True.
+            shuffle (bool): Whether to shuffle the data. Default is False.
             seed (int): Random seed. Default is 0.
             drop_last (bool): Whether to drop the last incomplete batch. Default is False.
+            batch_size (int): Batch size. Default is 1.
         """
         super().__init__(dataset, num_replicas, rank, shuffle, seed, drop_last)
-        self.clips_per_rank = (len(self.dataset.video_id_to_img_ids) // self.num_replicas) * self.dataset.truncated_bptt_steps
-        print(f"Last {len(self.dataset.video_id_to_img_ids) % self.num_replicas} videos will be dropped")
+        self.batch_size = batch_size
+        if drop_last:
+            self.videos_per_rank = len(self.dataset.video_id_to_img_ids) // (batch_size * self.num_replicas) * batch_size
+        else:
+            self.videos_per_rank = math.ceil(len(self.dataset.video_id_to_img_ids) / (batch_size * self.num_replicas)) * batch_size
+        self.padding_size = len(self.dataset.video_id_to_img_ids) - math.ceil(len(self.dataset.video_id_to_img_ids) / (batch_size * self.num_replicas)) * batch_size * self.num_replicas
+        self.total_size = self.videos_per_rank * self.num_replicas * self.dataset.truncated_bptt_steps
 
     def __iter__(self) -> Iterator[List[int]]:
         """
@@ -241,7 +222,21 @@ class DistributedVideoSampler(DistributedSampler):
 
         This method generates indices for the current process based on the rank and number of replicas.
         """
-        indices = list(range(len(self.dataset)))
-        # subsample
-        indices = indices[self.clips_per_rank * self.rank: self.clips_per_rank  * (self.rank + 1)]
+        indices = torch.arange(len(self.dataset)).reshape(-1, self.dataset.truncated_bptt_steps)
+        if self.shuffle:
+            # deterministically shuffle based on epoch and seed
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            indices = indices[torch.randperm(len(indices), generator=g).tolist()] # type: ignore[arg-type]
+        if not self.drop_last:
+            # add extra samples to make it evenly divisible
+            if self.padding_size <= len(indices):
+                indices = torch.cat((indices, indices[:self.padding_size])) 
+            else:
+                indices = torch.cat((indices, (indices.repeat(math.ceil(self.padding_size / len(indices)))[
+                    :self.padding_size
+                ])))
+
+        indices = indices[self.videos_per_rank * self.rank: self.videos_per_rank  * (self.rank + 1)]
+        indices = indices.reshape(-1, self.batch_size, self.dataset.truncated_bptt_steps).transpose(1, 2).reshape(-1)
         return iter(indices)

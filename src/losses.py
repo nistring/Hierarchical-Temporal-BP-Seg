@@ -2,6 +2,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class SparsityLoss(nn.Module):
+    """
+    Encourages spatially compact predictions by penalizing scattered activations.
+    """
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, predictions):
+        """
+        Args:
+            predictions: (B * T, C, H, W) logits
+        """
+        probs = F.softmax(predictions, dim=1)[:, 1:]  # Exclude background class (assumed to be class 0)
+
+        # Create coordinate grids
+        h_coords = torch.arange(probs.shape[2], device=probs.device) / (probs.shape[2] - 1) * 2 - 1  # Normalize to [-1, 1]
+        w_coords = torch.arange(probs.shape[3], device=probs.device) / (probs.shape[3] - 1) * 2 - 1  # Normalize to [-1, 1]
+        
+        # Compute center of mass
+        total_mass = torch.sum(probs, dim=(2,3), keepdim=True) + 1e-8
+        center_h = torch.sum(probs * h_coords.reshape(-1, 1), dim=(2,3), keepdim=True) / total_mass
+        center_w = torch.sum(probs * w_coords.reshape(1, -1), dim=(2,3), keepdim=True) / total_mass
+        
+        # Compute variance (spread) around center of mass
+        h_var = torch.sum(probs * (h_coords.reshape(1, 1, -1, 1) - center_h) ** 2, dim=(2,3), keepdim=True) / total_mass
+        w_var = torch.sum(probs * (w_coords.reshape(1, 1, 1, -1) - center_w) ** 2, dim=(2,3), keepdim=True) / total_mass
+    
+        return (h_var + w_var).mean()
+
 class TemporalConsistencyLoss(nn.Module):
     """
     Temporal Consistency Loss that enforces consistent predictions across frames.

@@ -8,7 +8,7 @@ from tqdm import tqdm
 # Load a model
 model = SAM("sam2.1_l.pt")
 
-for step in ["GE", "mindray", "val"]:
+for step in ["val"]:#"GE_train", "GE_val", "mindray_train", "mindray_val", "val"]:
     annotations_file = Path("coco_annotations") / f"{step}.json"
     coco = COCO(annotations_file)
     for id in tqdm(list(sorted(coco.imgs.keys()))):  # noqa

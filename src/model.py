@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import math
 
 import matplotlib.pyplot as plt
 import segmentation_models_pytorch as smp
@@ -14,6 +13,7 @@ from torchvision.transforms.functional import to_pil_image, pil_to_tensor
 from torchvision.transforms import v2
 from torch.utils.data import DataLoader
 import segmentation_models_pytorch as smp
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 import sys
 import yaml
@@ -23,7 +23,7 @@ from src.convgru import ConvGRU
 from src.convlstm import ConvLSTM
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
-from src.losses import TemporalConsistencyLoss  # Import the new losses
+from src.losses import TemporalConsistencyLoss, SparsityLoss  # Import the new losses
 
 class TemporalSegmentationModel(nn.Module):
     def __init__(
@@ -53,8 +53,9 @@ class TemporalSegmentationModel(nn.Module):
             freeze_encoder (bool): Whether to freeze the encoder weights. Default is False.
         """
         super().__init__()
-        assert encoder_depth >= temporal_depth, "Encoder depth should be greater than or equal to temporal depth."
+        assert encoder_depth > temporal_depth, "Encoder depth should be greater than temporal depth."
         # Initialize the segmentation model from segmentation_models_pytorch
+        self.num_classes = num_classes
         model = getattr(smp, segmentation_model_name)(
             encoder_name=encoder_name, encoder_weights="imagenet", classes=num_classes + 1, in_channels=1, encoder_depth=encoder_depth
         )
@@ -69,10 +70,9 @@ class TemporalSegmentationModel(nn.Module):
         self.temporal_models = nn.ModuleList()
         h, w = image_size
         # Initialize the temporal models (ConvLSTM or ConvGRU) for each encoder output channel
-        base_depth = encoder_depth - temporal_depth
-        if "mit" in encoder_name:
-            base_depth += 1
-        for i, out_channel in enumerate(self.encoder.out_channels[base_depth:]):
+        # base_depth = encoder_depth - temporal_depth
+        base_depth = 2
+        for i, out_channel in enumerate(self.encoder.out_channels[base_depth:base_depth + temporal_depth]):
             if temporal_model == "ConvLSTM":
                 self.temporal_models.append(
                     ConvLSTM(
@@ -119,22 +119,23 @@ class TemporalSegmentationModel(nn.Module):
                 features = self.encoder(x)
         else:
             features = self.encoder(x)
-
         
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in features]
 
         if not self.temporal_models:  # Skip temporal processing if there are no temporal models
             temporal_outs = features
         else:
-            temporal_outs = features[: -len(self.temporal_models)]
+            temporal_outs = features[:2]
             
             if hidden_state is None:
                 hidden_state = [None] * len(self.temporal_models)
             
             # Apply temporal models to the features
             for i, temporal_model in enumerate(self.temporal_models):
-                temporal_out, hidden_state[i] = temporal_model(features[i - len(self.temporal_models)], hidden_state[i])
+                temporal_out, hidden_state[i] = temporal_model(features[2+i], hidden_state[i])
                 temporal_outs.append(temporal_out)
+
+            temporal_outs.extend(features[2 + len(self.temporal_models):])
 
         temporal_outs = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_outs]
 
@@ -163,7 +164,9 @@ class SegmentationTrainer(L.LightningModule):
         alpha=0.5,  # Add alpha parameter
         encoder_depth=5,  # Add encoder_depth parameter
         temporal_depth=1,  # Add temporal_depth parameter
-        temporal_loss_weight=0.3,  # Weight for temporal consistency loss
+        temporal_loss_weight=1,  # Weight for temporal consistency loss
+        sparsity_weight=0.05,     # Weight for sparsity loss
+        ckpt_path=None,  # Path to load checkpoint
     ):
         """
         Initialize the SegmentationTrainer.
@@ -183,7 +186,9 @@ class SegmentationTrainer(L.LightningModule):
             alpha (float): Coefficient for CrossEntropy loss. Default is 0.5.
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
-            temporal_loss_weight (float): Weight for temporal consistency loss. Default is 0.3.
+            temporal_loss_weight (float): Weight for temporal consistency loss. Default is 1.
+            sparsity_weight (float): Weight for sparsity loss. Default is 0.05.
+            ckpt_path (str): Path to load the model checkpoint. Default is None.
         """
         super().__init__()
         self.model = model
@@ -201,6 +206,8 @@ class SegmentationTrainer(L.LightningModule):
         self.encoder_depth = encoder_depth
         self.temporal_depth = temporal_depth
         self.temporal_loss_weight = temporal_loss_weight
+        self.sparsity_weight = sparsity_weight
+        self.ckpt_path = ckpt_path
 
         # Define data augmentation transforms
         self.transform = v2.Compose(
@@ -209,7 +216,7 @@ class SegmentationTrainer(L.LightningModule):
                 v2.RandomApply([v2.RandomResizedCrop(image_size, scale=(0.75, 1.0), ratio=(3 / 4, 4 / 3))]),
                 v2.RandomApply([v2.GaussianNoise()]),
                 v2.RandomApply([v2.GaussianBlur(kernel_size=(7, 7), sigma=(0.1, 2))]),
-                v2.RandomApply([v2.ColorJitter(brightness=0.3, contrast=0.3)]),
+                v2.RandomApply([v2.ColorJitter(brightness=0.25, contrast=0.25)]),
                 v2.RandomApply([v2.ElasticTransform()]),
             ]
         )
@@ -218,6 +225,7 @@ class SegmentationTrainer(L.LightningModule):
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
         self.loss_crossentropy = nn.CrossEntropyLoss()
         self.loss_temporal = TemporalConsistencyLoss()
+        self.loss_sparsity = SparsityLoss()
 
     def show_batch(self, win_size=(80, 100), save=True):
         """
@@ -293,16 +301,17 @@ class SegmentationTrainer(L.LightningModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
-            sampler=DistributedVideoSampler(self.train_dataset),
+            sampler=DistributedVideoSampler(self.train_dataset, batch_size=self.batch_size),
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
+            shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
-            sampler=DistributedVideoSampler(self.val_dataset),
+            sampler=DistributedVideoSampler(self.val_dataset, batch_size=self.batch_size),
         )
 
     def test_dataloader(self):
@@ -310,7 +319,25 @@ class SegmentationTrainer(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
-        return optimizer
+        
+        if self.ckpt_path:
+            return optimizer
+        # Linear warmup scheduler
+        scheduler = LinearLR(
+            optimizer, 
+            start_factor=0.1,  # Start at 10% of target LR
+            end_factor=1.0,    # End at 100% of target LR
+            total_iters=int(len(self.train_dataset) / self.truncated_bptt_steps / self.batch_size / self.trainer.num_devices * 5)  # Warmup for 5 epochs
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",  # Update LR every step
+                "frequency": 1,
+            }
+        }
 
     def compute_loss(self, batch, batch_idx, stage):
         images, targets = batch
@@ -325,16 +352,17 @@ class SegmentationTrainer(L.LightningModule):
         loss_tversky = self.loss_tversky(masks, targets)
         loss_crossentropy = self.loss_crossentropy(masks, targets)
         loss_temporal = self.loss_temporal(masks_original)
+        loss_sparsity = self.loss_sparsity(masks)
 
         # Combine all losses
-        loss_log = loss_tversky + self.alpha * loss_crossentropy + self.temporal_loss_weight * loss_temporal
-        loss = masks.shape[0] * loss_log - masks_original.shape[0] * self.temporal_loss_weight * loss_temporal
+        loss = loss_tversky + self.alpha * loss_crossentropy + self.temporal_loss_weight * loss_temporal + self.sparsity_weight * loss_sparsity
 
         # Log each component of the loss
-        self.log(f"{stage}_loss", loss_log, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_tversky", loss_tversky, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_crossentropy", loss_crossentropy, on_step=False, on_epoch=True, sync_dist=True)
         self.log(f"{stage}_loss_temporal", loss_temporal, on_step=False, on_epoch=True, sync_dist=True)
+        self.log(f"{stage}_loss_sparsity", loss_sparsity, on_step=False, on_epoch=True, sync_dist=True)
 
         return loss
 
@@ -359,63 +387,97 @@ class SegmentationTrainer(L.LightningModule):
         return self.compute_loss(batch, batch_idx, "val")
 
     def on_test_start(self):
-        self.tp, self.fp, self.fn, self.tn = [], [], [], []
+        # For grided results
+        self.tp = [[[] for _ in range(self.truncated_bptt_steps)] for _ in range(self.truncated_bptt_steps)]
+        self.fp = [[[] for _ in range(self.truncated_bptt_steps)] for _ in range(self.truncated_bptt_steps)]
+        self.fn = [[[] for _ in range(self.truncated_bptt_steps)] for _ in range(self.truncated_bptt_steps)]
+        self.tn = [[[] for _ in range(self.truncated_bptt_steps)] for _ in range(self.truncated_bptt_steps)]
+
         self.video_id = None
         # Get the base name of data_dir for the results filename
         self.test_dataset_name = Path(self.test_dataset.data_dir).name
 
     def test_step(self, batch):
         images, targets = batch
-
         if self.video_id != targets["video_id"]:
             self.video_id = targets["video_id"]
-            self.hidden_state = None
+            self.hidden_states = []
 
-        masks, self.hidden_state = self.model(images, self.hidden_state)
-        targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=masks.shape[2])[..., 1:].permute(
+        if len(self.hidden_states) < self.truncated_bptt_steps:
+            self.hidden_states.append(None)
+
+        targets["masks"] = F.one_hot(targets["masks"][0].long(), num_classes=self.model.num_classes+1)[..., 1:].permute(
             0, 3, 1, 2
         )  # Remove the background class
-        masks = post_processing(masks)[:, 1:]  # Remove the background class
+        
+        def _process_masks_and_get_stats(masks, target_masks):
+            masks = post_processing(masks)[:, 1:]  # Remove the background class
+            # Convert masks to binary by taking argmax and using sum as values
+            masks_argmax = torch.argmax(masks, dim=1, keepdim=True)
+            masks_sum = torch.sum(masks, dim=1, keepdim=True)
+            masks = torch.zeros_like(masks)
+            masks.scatter_(1, masks_argmax, masks_sum)
+            return smp.metrics.get_stats(masks, target_masks, mode="multilabel", threshold=0.5)
+        
+        for i, hidden_state in enumerate(self.hidden_states):
+            masks, self.hidden_states[i] = self.model(images, hidden_state)
+            tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
 
-        # Convert masks to binary by taking argmax and using sum as values
-        masks_argmax = torch.argmax(masks, dim=1, keepdim=True)
-        masks_sum = torch.sum(masks, dim=1, keepdim=True)
-        masks = torch.zeros_like(masks)
-        masks.scatter_(1, masks_argmax, masks_sum)
-
-        tp, fp, fn, tn = smp.metrics.get_stats(masks, targets["masks"], mode="multilabel", threshold=0.5)
-        self.tp.append(tp)
-        self.fp.append(fp)
-        self.fn.append(fn)
-        self.tn.append(tn)
+            for j in range(i, len(self.hidden_states)):
+                self.tp[i][j].append(tp)
+                self.fp[i][j].append(fp)
+                self.fn[i][j].append(fn)
+                self.tn[i][j].append(tn)
 
     def on_test_epoch_end(self):
-        self.tp = torch.cat(self.tp)
-        self.fp = torch.cat(self.fp)
-        self.fn = torch.cat(self.fn)
-        self.tn = torch.cat(self.tn)
-        seq_obj_appear = (self.tp + self.fn).bool()
+        # Compute the metrics for each segment
+        iou_scores = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps, self.model.num_classes)
+        f1_scores = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps, self.model.num_classes)
+        precisions = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps, self.model.num_classes)
+        sensitivities = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps, self.model.num_classes)
 
-        iou_score = smp.metrics.iou_score(self.tp, self.fp, self.fn, self.tn)
-        f1_score = smp.metrics.f1_score(self.tp, self.fp, self.fn, self.tn)
-        overall_score = 0.5 * (iou_score + f1_score)
-        seq_obj_appear_sum = seq_obj_appear.sum(0)
+        mean_iou_score = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps)
+        mean_f1_score = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps)
+        mean_precision = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps)
+        mean_sensitivity = torch.zeros(self.truncated_bptt_steps, self.truncated_bptt_steps)
 
-        iou_score = ((iou_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
-        f1_score = ((f1_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
-        overall_score = ((overall_score * seq_obj_appear).sum(0) / seq_obj_appear_sum).cpu().detach()
+        for i in range(self.truncated_bptt_steps):
+            for j in range(i, self.truncated_bptt_steps):
+                tp = torch.cat(self.tp[i][j])
+                fp = torch.cat(self.fp[i][j])
+                fn = torch.cat(self.fn[i][j])
+                tn = torch.cat(self.tn[i][j])
 
-        mean_iou_score = iou_score.mean()
-        mean_f1_score = f1_score.mean()
-        mean_overall_score = overall_score.mean()
+                # seq = (tp + fn).sum(1, keepdim=True).bool()
+                # tp = tp * seq
+                # fp = fp * seq
+                # fn = fn * seq
+                # tn = tn * seq
+
+                tp_sum = tp.sum(0, keepdim=True)
+                fp_sum = fp.sum(0, keepdim=True)
+                fn_sum = fn.sum(0, keepdim=True)
+                tn_sum = tn.sum(0, keepdim=True)
+
+                iou_scores[i, j] = smp.metrics.iou_score(tp_sum, fp_sum, fn_sum, tn_sum)[0].cpu().detach()
+                f1_scores[i, j] = smp.metrics.f1_score(tp_sum, fp_sum, fn_sum, tn_sum)[0].cpu().detach()
+                precisions[i, j] = smp.metrics.precision(tp_sum, fp_sum, fn_sum, tn_sum)[0].cpu().detach()
+                sensitivities[i, j] = smp.metrics.sensitivity(tp_sum, fp_sum, fn_sum, tn_sum)[0].cpu().detach()
+
+                mean_iou_score[i, j] = smp.metrics.iou_score(tp, fp, fn, tn, reduction="micro").cpu().detach()
+                mean_f1_score[i, j] = smp.metrics.f1_score(tp, fp, fn, tn, reduction="micro").cpu().detach()
+                mean_precision[i, j] = smp.metrics.precision(tp, fp, fn, tn, reduction="micro").cpu().detach()
+                mean_sensitivity[i, j] = smp.metrics.sensitivity(tp, fp, fn, tn, reduction="micro").cpu().detach()
 
         results = {
-            "iou_score": iou_score.tolist(),
-            "f1_score": f1_score.tolist(),
-            "overall_score": overall_score.tolist(),
-            "mean_iou_score": mean_iou_score.mean().item(),
-            "mean_f1_score": mean_f1_score.mean().item(),
-            "mean_overall_score": mean_overall_score.mean().item(),
+            "iou_score": iou_scores.tolist(),
+            "f1_score": f1_scores.tolist(),
+            "precision": precisions.tolist(),
+            "sensitivity": sensitivities.tolist(),
+            "mean_iou_score": mean_iou_score.tolist(),
+            "mean_f1_score": mean_f1_score.tolist(),
+            "mean_precision": mean_precision.tolist(),
+            "mean_sensitivity": mean_sensitivity.tolist(),
         }
 
         logdir = Path(self.logdir)

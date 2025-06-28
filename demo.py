@@ -71,7 +71,6 @@ def main(
     temporal_model="ConvGRU",
     image_size=(480, 640),
     temporal_depth=1,  # Add temporal_depth parameter
-    attention_module=None,
 ):
     """
     Main function to process video stream and perform segmentation.
@@ -93,7 +92,7 @@ def main(
             encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth,
         ),
         checkpoint_path,
-    )
+    ).cuda()
 
     # Check if input_folder is a digit (camera index)
     if input_folder.isdigit():

@@ -51,8 +51,8 @@ def crop_vid(name, roi=None):
             break
         if bbox is None:
             bbox = crop(frame, roi)
-            if name == "00610090.mp4":
-                bbox = (639, 130, 819, 747)
+            # if name == "00610090.mp4":
+            #     bbox = (639, 130, 819, 747)
             out = cv2.VideoWriter(f"SUIT/demo/input/{name}", fourcc, cap.get(cv2.CAP_PROP_FPS), (bbox[2], bbox[3]))
         out.write(frame[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]])
     cap.release()
@@ -146,12 +146,15 @@ def preprocess(anno_root, roi=None):
 
 
 if __name__ == "__main__":
-    # preprocess("raw/anno/GE", roi=(500, 100, 1100, 800))
-    # preprocess("raw/anno/mindray")
+    # preprocess("raw/anno/GE_train", roi=(500, 100, 1100, 800))
+    # preprocess("raw/anno/GE_val", roi=(500, 100, 1100, 800))
+    # preprocess("raw/anno/mindray_train")
+    # preprocess("raw/anno/mindray_val")
+    preprocess("raw/anno/val")
 
-    # for i in range(51, 76):
-    #     crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")
-    for vid in os.listdir("raw/anno/mindray"):
-        crop_vid(vid + ".mp4")
-    for vid in os.listdir("raw/anno/GE"):
-        crop_vid(vid + ".mp4", roi=(500, 100, 1100, 800))
+    # # for i in range(51, 76):
+    # #     crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")
+    # for vid in os.listdir("raw/anno/mindray_val"):
+    #     crop_vid(vid + ".mp4")
+    # for vid in os.listdir("raw/anno/GE_val"):
+    #     crop_vid(vid + ".mp4", roi=(500, 100, 1100, 800))

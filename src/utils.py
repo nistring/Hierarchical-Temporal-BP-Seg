@@ -29,6 +29,7 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     masks /= 2
     masks[0] += 0.5
     masks = v2.Resize(frame.shape[1:])(masks)
+    # masks[1:] = torch.zeros_like(masks[1:]).scatter_(0, masks[1:].argmax(dim=0, keepdim=True), 1 - masks[0:1])
     frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)  # Overlay the masks on the frame
     frame = frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
     return frame
@@ -52,7 +53,6 @@ def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
         model_weights[new_key] = model_weights.pop(key)
 
     model.load_state_dict(model_weights)
-    model = model.cuda()
     return model
 
 
@@ -68,9 +68,16 @@ def post_processing(masks: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Processed segmentation masks.
     """
     masks = torch.nn.Softmax(dim=1)(masks[0])  # drop batch_size dimension
-    masks_suppressed = masks[:, 0] > 0.5
-    masks[masks_suppressed.unsqueeze(1).repeat(1, masks.shape[1], 1, 1)] = 0
-    masks[:, 0][masks_suppressed] = 1
-    del masks_suppressed
+    masks[:, 1:] = masks[:, 1:] * (masks[:, 0:1] < 0.5)  # Suppress background
+
+    masks_by_class = masks.argmax(dim=1) # Get the class with the highest probability for each pixel
+    masks[:, 2] = masks[:, 2] * torch.any(masks_by_class == 1, dim=(1, 2), keepdim=True)  # C6 cannot exist without C5
+    masks[:, 4] = masks[:, 4] * torch.any(masks_by_class == 3, dim=(1, 2), keepdim=True)  # C8 cannot exist without C7
+    masks[:, 6:] = masks[:, 6:] * torch.any(masks_by_class == 4, dim=(1, 2), keepdim=True).unsqueeze(1)   # SSN, AD, PD cannot exist without LT
+    C56_ADPDSSN = ((masks_by_class < 3) * (masks_by_class > 0)).sum(dim=(1, 2), keepdim=True) > (masks_by_class > 5).sum(dim=(1, 2), keepdim=True)  # C5 + C6 > AD + PD + SSN
+    masks[:, 1:3] = masks[:, 1:3] * C56_ADPDSSN[:, None]  # C5 and C6 cannot exist with AD, PD, SSN
+    masks[:, 6:] = masks[:, 6:] * ~C56_ADPDSSN[:, None]  # AD, PD, SSN cannot exist with C5 or C6
+
+    masks[:, 0] = 1 - masks[:, 1:].sum(dim=1)  # Background is the rest
 
     return masks
