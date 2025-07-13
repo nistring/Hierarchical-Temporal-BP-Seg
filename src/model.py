@@ -19,8 +19,7 @@ import sys
 import yaml
 
 sys.path.append("./")
-from src.convgru import ConvGRU
-from src.convlstm import ConvLSTM
+from src.rnns import ConvLSTM, ConvGRU, LSTM, GRU
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
 from src.losses import TemporalConsistencyLoss, SparsityLoss  # Import the new losses
@@ -37,6 +36,7 @@ class TemporalSegmentationModel(nn.Module):
         encoder_depth=5,
         temporal_depth=1,
         freeze_encoder=False,
+        **model_kwargs,  # Accept additional model arguments
     ):
         """
         Initialize the TemporalSegmentationModel.
@@ -51,21 +51,35 @@ class TemporalSegmentationModel(nn.Module):
             encoder_depth (int): Depth of the encoder. Default is 5.
             temporal_depth (int): Depth of the temporal model. Default is 1.
             freeze_encoder (bool): Whether to freeze the encoder weights. Default is False.
+            **model_kwargs: Additional arguments to pass to the segmentation model.
         """
         super().__init__()
         assert encoder_depth > temporal_depth, "Encoder depth should be greater than temporal depth."
         # Initialize the segmentation model from segmentation_models_pytorch
         self.num_classes = num_classes
-        model = getattr(smp, segmentation_model_name)(
-            encoder_name=encoder_name, encoder_weights="imagenet", classes=num_classes + 1, in_channels=1, encoder_depth=encoder_depth
-        )
+        
+        # Prepare default arguments
+        model_args = {
+            "encoder_name": encoder_name,
+            "encoder_weights": "imagenet",
+            "classes": num_classes + 1,
+            "in_channels": 1,
+            "encoder_depth": encoder_depth
+        }
+        
+        # Update with additional model arguments
+        model_args.update(model_kwargs)
+        
+        model = getattr(smp, segmentation_model_name)(**model_args)
         
         self.encoder = model.encoder
         self.decoder = model.decoder
         self.head = model.segmentation_head
 
         # Freeze encoder weights if specified
-        self.freeze_encoder = freeze_encoder
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
 
         self.temporal_models = nn.ModuleList()
         h, w = image_size
@@ -73,28 +87,22 @@ class TemporalSegmentationModel(nn.Module):
         # base_depth = encoder_depth - temporal_depth
         base_depth = 2
         for i, out_channel in enumerate(self.encoder.out_channels[base_depth:base_depth + temporal_depth]):
+            kwargs = {
+                "input_size": (h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
+                "input_dim": min(out_channel, 64),
+                "hidden_dim": min(out_channel, 64),
+                "kernel_size": (3, 3),
+                "num_layers": num_layers,
+                "batch_first": True,
+            }
             if temporal_model == "ConvLSTM":
-                self.temporal_models.append(
-                    ConvLSTM(
-                        input_size=(h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
-                        input_dim=out_channel,
-                        hidden_dim=out_channel,
-                        kernel_size=(3, 3),
-                        num_layers=num_layers,
-                        batch_first=True,
-                    )
-                )
+                self.temporal_models.append(ConvLSTM(**kwargs))
             elif temporal_model == "ConvGRU":
-                self.temporal_models.append(
-                    ConvGRU(
-                        input_size=(h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
-                        input_dim=out_channel,
-                        hidden_dim=out_channel,
-                        kernel_size=(3, 3),
-                        num_layers=num_layers,
-                        batch_first=True,
-                    )
-                )
+                self.temporal_models.append(ConvGRU(**kwargs))
+            elif temporal_model == "LSTM":
+                self.temporal_models.append(LSTM(**kwargs))
+            elif temporal_model == "GRU":
+                self.temporal_models.append(GRU(**kwargs))
             else:
                 raise ValueError("Unsupported temporal model type. Choose from 'ConvLSTM' or 'ConvGRU'.")
 
@@ -114,13 +122,7 @@ class TemporalSegmentationModel(nn.Module):
         x = x.reshape(batch_size * seq_len, c, h, w)
 
         # Extract features using the encoder
-        if self.freeze_encoder:
-            with torch.no_grad():
-                features = self.encoder(x)
-        else:
-            features = self.encoder(x)
-        
-        features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in features]
+        features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
 
         if not self.temporal_models:  # Skip temporal processing if there are no temporal models
             temporal_outs = features
@@ -132,8 +134,11 @@ class TemporalSegmentationModel(nn.Module):
             
             # Apply temporal models to the features
             for i, temporal_model in enumerate(self.temporal_models):
-                temporal_out, hidden_state[i] = temporal_model(features[2+i], hidden_state[i])
-                temporal_outs.append(temporal_out)
+                c = min(features[2 + i].shape[2], 64) # Adjust channel dimension for temporal model
+                temporal_out, hidden_state[i] = temporal_model(features[2 + i][:, :, :c], hidden_state[i])
+                if c < features[2 + i].shape[2]:
+                    temporal_out = torch.cat((temporal_out, features[2 + i][:, :, c:]), dim=2)
+                temporal_outs.append(temporal_out)  # Concatenate with the remaining channels
 
             temporal_outs.extend(features[2 + len(self.temporal_models):])
 
@@ -167,6 +172,7 @@ class SegmentationTrainer(L.LightningModule):
         temporal_loss_weight=1,  # Weight for temporal consistency loss
         sparsity_weight=0.05,     # Weight for sparsity loss
         ckpt_path=None,  # Path to load checkpoint
+        **kwargs,  # Accept additional arguments
     ):
         """
         Initialize the SegmentationTrainer.
@@ -189,6 +195,7 @@ class SegmentationTrainer(L.LightningModule):
             temporal_loss_weight (float): Weight for temporal consistency loss. Default is 1.
             sparsity_weight (float): Weight for sparsity loss. Default is 0.05.
             ckpt_path (str): Path to load the model checkpoint. Default is None.
+            **kwargs: Additional arguments (ignored for backward compatibility).
         """
         super().__init__()
         self.model = model
@@ -327,7 +334,7 @@ class SegmentationTrainer(L.LightningModule):
             optimizer, 
             start_factor=0.1,  # Start at 10% of target LR
             end_factor=1.0,    # End at 100% of target LR
-            total_iters=int(len(self.train_dataset) / self.truncated_bptt_steps / self.batch_size / self.trainer.num_devices * 5)  # Warmup for 5 epochs
+            total_iters=int(len(self.train_dataset) / self.batch_size / self.trainer.num_devices / self.trainer.accumulate_grad_batches * 5)  # Warmup for 5 epochs
         )
         
         return {
@@ -372,7 +379,7 @@ class SegmentationTrainer(L.LightningModule):
         elif self.temporal_depth > 0:
             # Detach the hidden state to prevent backpropagation through the entire sequence
             # This is important for truncated backpropagation
-            self.hidden_state = [[h.detach() for h in hidden_state] for hidden_state in self.hidden_state]
+            self.hidden_state = [hidden_state.detach() for hidden_state in self.hidden_state]
 
     def training_step(self, batch, batch_idx):
         return self.compute_loss(batch, batch_idx, "train")
@@ -447,12 +454,6 @@ class SegmentationTrainer(L.LightningModule):
                 fp = torch.cat(self.fp[i][j])
                 fn = torch.cat(self.fn[i][j])
                 tn = torch.cat(self.tn[i][j])
-
-                # seq = (tp + fn).sum(1, keepdim=True).bool()
-                # tp = tp * seq
-                # fp = fp * seq
-                # fn = fn * seq
-                # tn = tn * seq
 
                 tp_sum = tp.sum(0, keepdim=True)
                 fp_sum = fp.sum(0, keepdim=True)

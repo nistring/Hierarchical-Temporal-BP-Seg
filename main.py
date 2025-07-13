@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback, StochasticWeightAveraging, ModelSummary
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback, StochasticWeightAveraging
 from src.data_loader import UltrasoundTestDataset, UltrasoundTrainDataset
 from src.model import TemporalSegmentationModel, SegmentationTrainer
 import yaml
@@ -10,17 +10,52 @@ import argparse
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger
 from src.utils import load_model
+from lightning.pytorch.utilities.model_summary import summarize
+from lightning.pytorch.utilities import measure_flops
 
 
 class SaveConfigCallback(Callback):
-    def __init__(self, config):
+    def __init__(self, config, model_config):
         self.config = config
+        self.model_config = model_config
 
     def on_train_start(self, trainer, pl_module):
         # Save the configuration file at the start of training
         config_path = os.path.join(trainer.log_dir, "config.yaml")
         with open(config_path, "w") as f:
             yaml.dump(self.config, f)
+        
+        # Calculate and save model summary and FLOPs
+        self._save_model_info(trainer, pl_module)
+    
+    def _save_model_info(self, trainer, pl_module):
+
+        # Get model input dimensions
+        sequence_length = self.config["model"]["sequence_length"]
+        image_size = self.config["model"]["image_size"]
+        
+        # Calculate FLOPs using meta device
+        with torch.no_grad():
+            x = torch.randn(1, 1, 1, image_size[0], image_size[1], device=pl_module.device)
+            # Use the pl_module directly instead of creating a meta model
+            model_fwd = lambda: pl_module.model(x)
+            fwd_flops = measure_flops(pl_module.model, model_fwd)
+        del x, model_fwd
+        # Get model summary
+        model_summary = summarize(pl_module, max_depth=3)
+        
+        # Save model info to file
+        info_path = os.path.join(trainer.log_dir, "model_info.txt")
+        with open(info_path, "w") as f:
+            f.write("Model Summary and FLOPs Information\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(str(model_summary))
+            f.write(f"\n\nFLOPs Information:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Input shape: (1, {sequence_length}, 3, {image_size[0]}, {image_size[1]})\n")
+            f.write(f"Forward FLOPs: {fwd_flops:,}\n")
+            f.write(f"Forward GFLOPs: {fwd_flops / 1e9:.2f}\n")
+                
 
 def main(config, best_model_path=None):
     """
@@ -59,16 +94,22 @@ def main(config, best_model_path=None):
     )
 
     # Initialize the model and trainer
-    model = TemporalSegmentationModel(
-        encoder_name=config["model"]["encoder_name"],
-        segmentation_model_name=config["model"]["segmentation_model_name"],
-        num_classes=config["model"]["num_classes"],
-        temporal_model=config["model"]["temporal_model"],
-        image_size=tuple(config["model"]["image_size"]),
-        encoder_depth=config["model"]["encoder_depth"],
-        temporal_depth=config["model"]["temporal_depth"],
-        freeze_encoder=config["model"].get("freeze_encoder", False),  # Get freeze_encoder from config
-    )
+    model_config = {
+        "encoder_name": config["model"]["encoder_name"],
+        "segmentation_model_name": config["model"]["segmentation_model_name"],
+        "num_classes": config["model"]["num_classes"],
+        "temporal_model": config["model"]["temporal_model"],
+        "image_size": tuple(config["model"]["image_size"]),
+        "encoder_depth": config["model"]["encoder_depth"],
+        "temporal_depth": config["model"]["temporal_depth"],
+        "freeze_encoder": config["model"].get("freeze_encoder", False),
+    }
+    
+    # Add any additional model arguments from config
+    if "model_kwargs" in config["model"]:
+        model_config.update(config["model"]["model_kwargs"])
+    
+    model = TemporalSegmentationModel(**model_config)
     if config["trainer"].get("ckpt_path", False):
         model = load_model(model, config["trainer"]["ckpt_path"])
 
@@ -96,10 +137,9 @@ def main(config, best_model_path=None):
     torch.set_float32_matmul_precision("high")
 
     callbacks=[
-        ModelSummary(max_depth=3),
         ModelCheckpoint(monitor=config["logging"]["monitor"], mode=config["logging"]["mode"], save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
-        SaveConfigCallback(config),
+        SaveConfigCallback(config, model_config),
         StochasticWeightAveraging(
             swa_epoch_start=config["trainer"]["max_epochs"] - 10,
             swa_lrs=0.5 * config["model"]["learning_rate"],
@@ -109,8 +149,11 @@ def main(config, best_model_path=None):
 
     # Initialize the trainer
     trainer = L.Trainer(
-        # strategy=DDPStrategy(),
-        strategy="ddp_find_unused_parameters_true",
+        strategy=DDPStrategy(
+            static_graph=False,
+            gradient_as_bucket_view=True
+        ),
+        # strategy="ddp_find_unused_parameters_true",
         max_epochs=config["trainer"]["max_epochs"],
         devices=config["trainer"]["gpus"],
         callbacks=callbacks,
