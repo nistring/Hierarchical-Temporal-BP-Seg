@@ -5,6 +5,7 @@ from src.model import TemporalSegmentationModel
 from src.utils import process_video_stream, load_model, post_processing
 from torchvision.transforms import v2
 import yaml
+import os
 
 
 def process_video(video_source, output_path, model, image_size):
@@ -61,58 +62,58 @@ def process_video(video_source, output_path, model, image_size):
     cv2.destroyAllWindows()  # Close all OpenCV windows
 
 
-def main(
-    input_folder,
-    output_folder,
-    checkpoint_path,
-    num_classes=10,
-    encoder_name="resnet34",
-    segmentation_model_name="Unet",
-    temporal_model="ConvGRU",
-    image_size=(480, 640),
-    temporal_depth=1,  # Add temporal_depth parameter
-):
+def main(config, input_folder, output_folder, checkpoint_path):
     """
     Main function to process video stream and perform segmentation.
 
     Args:
+        config (dict): Configuration dictionary containing model parameters.
         input_folder (str): Path to input folder containing video files.
         output_folder (str): Path to output folder to save processed videos.
         checkpoint_path (str): Path to model checkpoint.
-        num_classes (int): Number of classes for segmentation. Default is 10.
-        encoder_name (str): Encoder model name. Default is "resnet34".
-        segmentation_model_name (str): Segmentation model name. Default is "Unet".
-        temporal_model (str): Temporal model type. Default is "ConvGRU".
-        image_size (tuple): Image size for the model. Default is (480, 640).
-        temporal_depth (int): Depth of the temporal model. Default is 1.
     """
+    # Initialize the model with config parameters
+    model_config = {
+        "encoder_name": config["model"]["encoder_name"],
+        "segmentation_model_name": config["model"]["segmentation_model_name"],
+        "num_classes": config["model"]["num_classes"],
+        "temporal_model": config["model"]["temporal_model"],
+        "image_size": tuple(config["model"]["image_size"]),
+        "encoder_depth": config["model"]["encoder_depth"],
+        "temporal_depth": config["model"]["temporal_depth"],
+        "freeze_encoder": config["model"].get("freeze_encoder", False),
+        "num_layers": config["model"].get("num_layers", 1),
+    }
+    
+    # Add any additional model arguments from config
+    if "model_kwargs" in config["model"]:
+        model_config.update(config["model"]["model_kwargs"])
+    
     # Load the model with the specified parameters and checkpoint
     model = load_model(
-        TemporalSegmentationModel(
-            encoder_name, segmentation_model_name, num_classes, image_size, temporal_model, temporal_depth=temporal_depth,
-        ),
+        TemporalSegmentationModel(**model_config),
         checkpoint_path,
     ).cuda()
 
     # Check if input_folder is a digit (camera index)
-    if input_folder.isdigit():
+    if str(input_folder).isdigit():
         input_folder = int(input_folder)
-        process_video(input_folder, None, model, image_size)
+        process_video(input_folder, None, model, tuple(config["model"]["image_size"]))
+        return
 
     # Process each video file in the input folder
     for video_file in os.listdir(input_folder):
         video_source = os.path.join(input_folder, video_file)
         output_path = os.path.join(output_folder, video_file)
-        process_video(video_source, output_path, model, image_size)
+        process_video(video_source, output_path, model, tuple(config["model"]["image_size"]))
 
 
 if __name__ == "__main__":
     import argparse
-    import os
 
     parser = argparse.ArgumentParser(description="Segmentation Demo")
     parser.add_argument("--config", type=str, required=True, help="Path to configuration file")
-    parser.add_argument("--input_folder", type=str, required=True, help="Path to input folder containing video files")
+    parser.add_argument("--input_folder", type=str, required=True, help="Path to input folder containing video files or camera index")
     parser.add_argument("--output_folder", type=str, required=True, help="Path to output folder to save processed videos")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
 
@@ -123,15 +124,4 @@ if __name__ == "__main__":
         config = yaml.safe_load(file)
 
     # Call main function with parameters from config and command line arguments
-    main(
-        args.input_folder,
-        args.output_folder,
-        args.checkpoint,
-        config["model"].get("num_classes", 10),
-        config["model"].get("encoder_name", "resnet34"),
-        config["model"].get("segmentation_model_name", "Unet"),
-        config["model"].get("temporal_model", "ConvGRU"),
-        tuple(config["model"].get("image_size", (480, 640))),
-        config["model"].get("temporal_depth", 1),  # Add temporal_depth parameter
-        config["model"].get("attention_module", None),
-    )
+    main(config, args.input_folder, args.output_folder, args.checkpoint)

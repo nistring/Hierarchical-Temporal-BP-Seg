@@ -3,371 +3,68 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import math
-
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, activation=F.tanh, peephole=False, batchnorm=False):
-        """
-        Initialize ConvLSTM cell.
-        Parameters
-        ----------
-        input_size: (int, int)
-            Height and width of input tensor as (height, width).
-        input_dim: int
-            Number of channels of input tensor.
-        hidden_dim: int
-            Number of channels of hidden state.
-        kernel_size: (int, int)
-            Size of the convolutional kernel.
-        bias: bool
-            Whether or not to add the bias.
-        """
-        super(ConvLSTMCell, self).__init__()
-
+# Base classes for code reuse
+class BaseConvRNNCell(nn.Module):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, activation=F.tanh, dilation=1):
+        super().__init__()
         self.height, self.width = input_size
-        self.input_dim          = input_dim
-        self.hidden_dim         = hidden_dim
-
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.kernel_size = kernel_size
-        self.padding     = kernel_size[0] // 2, kernel_size[1] // 2
-        self.bias        = bias
-        self.activation  = activation
-        self.peephole    = peephole
-        self.batchnorm   = batchnorm
-
-        if peephole:
-            self.Wci = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
-            self.Wcf = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
-            self.Wco = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
-
-        self.conv = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
-                              out_channels=4 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-
-        self.reset_parameters()
-
-    def forward(self, input, prev_state):
-        h_prev, c_prev = prev_state
-
-        combined = torch.cat((input, h_prev), dim=1)  # concatenate along channel axis
-        combined_conv = self.conv(combined)
-
-        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
-
-        if self.peephole:
-            i = F.sigmoid(cc_i + self.Wci * c_prev)
-            f = F.sigmoid(cc_f + self.Wcf * c_prev)
-        else:
-            i = F.sigmoid(cc_i)
-            f = F.sigmoid(cc_f)
-
-        g = self.activation(cc_g)
-        c_cur = f * c_prev + i * g
-
-        if self.peephole:
-            o = F.sigmoid(cc_o + self.Wco * c_cur)
-        else:
-            o = F.sigmoid(cc_o)
-
-        h_cur = o * self.activation(c_cur)
-
-        return h_cur, c_cur
+        self.dilation = dilation
+        self.padding = ((kernel_size[0] - 1) * dilation) // 2, ((kernel_size[1] - 1) * dilation) // 2
+        self.bias = bias
+        self.activation = activation
 
     def init_hidden(self, batch_size, cuda=True, device='cuda'):
-        state = (torch.zeros(batch_size, self.hidden_dim, self.height, self.width),
-                 torch.zeros(batch_size, self.hidden_dim, self.height, self.width))
-        if cuda:
-            state = (state[0].to(device), state[1].to(device))
-        return state
+        raise NotImplementedError
 
     def reset_parameters(self):
-        #self.conv.reset_parameters()
-        nn.init.xavier_uniform_(self.conv.weight, gain=nn.init.calculate_gain('tanh'))
-        self.conv.bias.data.zero_()
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.xavier_uniform_(module.weight, gain=nn.init.calculate_gain('tanh'))
+                if module.bias is not None:
+                    module.bias.data.zero_()
 
-        if self.batchnorm:
-            self.bn1.reset_parameters()
-            self.bn2.reset_parameters()
-        if self.peephole:
-            std = 1. / math.sqrt(self.hidden_dim)
-            self.Wci.data.uniform_(0,1)#(std=std)
-            self.Wcf.data.uniform_(0,1)#(std=std)
-            self.Wco.data.uniform_(0,1)#(std=std)
-
-
-class ConvLSTM(nn.Module):
+class BaseConvRNN(nn.Module):
     def __init__(self, input_size, input_dim, hidden_dim, kernel_size, num_layers,
-                 batch_first=True, bias=True, activation=F.tanh, peephole=False, batchnorm=False):
-        super(ConvLSTM, self).__init__()
-
+                 batch_first=True, bias=True, activation=F.tanh, dilation=1, cell_class=None, **cell_kwargs):
+        super().__init__()
         self._check_kernel_size_consistency(kernel_size)
-
-        # Make sure that both `kernel_size` and `hidden_dim` are lists having len == num_layers
+        
+        # Extend parameters for multilayer
         kernel_size = self._extend_for_multilayer(kernel_size, num_layers)
-        hidden_dim  = self._extend_for_multilayer(hidden_dim, num_layers)
-        activation  = self._extend_for_multilayer(activation, num_layers)
-
-        if not len(kernel_size) == len(hidden_dim) == len(activation) == num_layers:
-            raise ValueError('Inconsistent list length.')
+        hidden_dim = self._extend_for_multilayer(hidden_dim, num_layers)
+        activation = self._extend_for_multilayer(activation, num_layers)
+        dilation = self._extend_for_multilayer(dilation, num_layers)
 
         self.height, self.width = input_size
-
-        self.input_dim  = input_dim
+        self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.kernel_size = kernel_size
         self.num_layers = num_layers
         self.batch_first = batch_first
-        self.bias = bias
 
+        # Create cell list
         cell_list = []
-        for i in range(0, self.num_layers):
-            cur_input_dim = self.input_dim if i == 0 else self.hidden_dim[i-1]
-
-            cell_list.append(ConvLSTMCell(input_size=(self.height, self.width),
-                                          input_dim=cur_input_dim,
-                                          hidden_dim=self.hidden_dim[i],
-                                          kernel_size=self.kernel_size[i],
-                                          bias=self.bias,
-                                          activation=activation[i],
-                                          peephole=peephole,
-                                          batchnorm=batchnorm))
-
+        for i in range(num_layers):
+            cur_input_dim = input_dim if i == 0 else hidden_dim[i-1]
+            cell_list.append(cell_class(
+                input_size=(self.height, self.width),
+                input_dim=cur_input_dim,
+                hidden_dim=hidden_dim[i],
+                kernel_size=kernel_size[i],
+                bias=bias,
+                activation=activation[i],
+                dilation=dilation[i],
+                **cell_kwargs
+            ))
+        
         self.cell_list = nn.ModuleList(cell_list)
-
-        self.device = 'cpu'
         self.reset_parameters()
-
-    def forward(self, input, hidden_state):
-        """
-
-        Parameters
-        ----------
-        input_tensor:
-            5-D Tensor either of shape (t, b, c, h, w) or (b, t, c, h, w)
-        hidden_state:
-        Returns
-        -------
-        last_state_list, layer_output
-        """
-        cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
-
-        if not hidden_state:
-            hidden_state = self.get_init_states(cur_layer_input[0].size(int(not self.batch_first)))
-
-        seq_len = len(cur_layer_input)
-
-        layer_output_list = []
-        last_state_list   = []
-
-        for layer_idx in range(self.num_layers):
-            h, c = hidden_state[layer_idx]
-            output_inner = []
-            for t in range(seq_len):
-                h, c = self.cell_list[layer_idx](input=cur_layer_input[t],
-                                                 prev_state=[h, c])
-                output_inner.append(h)
-
-            cur_layer_input = output_inner
-            last_state_list.append((h, c))
-
-        layer_output = torch.stack(output_inner, dim=int(self.batch_first))
-        last_state_list = torch.stack(last_state_list, dim=int(self.batch_first))
-
-        return layer_output, last_state_list
 
     def reset_parameters(self):
         for c in self.cell_list:
             c.reset_parameters()
-
-    def get_init_states(self, batch_size, cuda=True, device='cuda'):
-        init_states = []
-        for i in range(self.num_layers):
-            init_states.append(self.cell_list[i].init_hidden(batch_size, cuda, device))
-        return init_states
-
-    @staticmethod
-    def _check_kernel_size_consistency(kernel_size):
-        if not (isinstance(kernel_size, tuple) or (isinstance(kernel_size, list)
-            and all([isinstance(elem, tuple) for elem in kernel_size]))):
-            raise ValueError('`Kernel_size` must be tuple or list of tuples')
-
-    @staticmethod
-    def _extend_for_multilayer(param, num_layers):
-        if not isinstance(param, list):
-            param = [param] * num_layers
-        return param
-    
-class ConvGRUCell(nn.Module):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, activation=F.tanh, batchnorm=False):
-        """
-        Initialize ConvGRU cell.
-        Parameters
-        ----------
-        input_size: (int, int)
-            Height and width of input tensor as (height, width).
-        input_dim: int
-            Number of channels of input tensor.
-        hidden_dim: int
-            Number of channels of hidden state.
-        kernel_size: (int, int)
-            Size of the convolutional kernel.
-        bias: bool
-            Whether or not to add the bias.
-        """
-        super(ConvGRUCell, self).__init__()
-
-        self.height, self.width = input_size
-        self.input_dim          = input_dim
-        self.hidden_dim         = hidden_dim
-
-        self.kernel_size = kernel_size
-        self.padding     = kernel_size[0] // 2, kernel_size[1] // 2
-        self.bias        = bias
-        self.activation  = activation
-        self.batchnorm   = batchnorm
-
-
-        self.conv_zr = nn.Conv2d(in_channels=self.input_dim + self.hidden_dim,
-                              out_channels=2 * self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-
-        self.conv_h1 = nn.Conv2d(in_channels=self.input_dim,
-                              out_channels=self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-
-        self.conv_h2 = nn.Conv2d(in_channels=self.hidden_dim,
-                              out_channels=self.hidden_dim,
-                              kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias=self.bias)
-
-        self.reset_parameters()
-
-    def forward(self, input, h_prev):
-        combined = torch.cat((input, h_prev), dim=1)  # concatenate along channel axis
-
-        combined_conv = F.sigmoid(self.conv_zr(combined))
-
-        z, r = torch.split(combined_conv, self.hidden_dim, dim=1)
-
-        h_ = self.activation(self.conv_h1(input) + r * self.conv_h2(h_prev))
-
-        h_cur = (1 - z) * h_ + z * h_prev
-
-        return h_cur
-
-    def init_hidden(self, batch_size, cuda=True):
-        state = torch.zeros(batch_size, self.hidden_dim, self.height, self.width)
-        if cuda:
-            state = state.cuda()
-        return state
-
-    def reset_parameters(self):
-        #self.conv.reset_parameters()
-        nn.init.xavier_uniform_(self.conv_zr.weight, gain=nn.init.calculate_gain('tanh'))
-        self.conv_zr.bias.data.zero_()
-        nn.init.xavier_uniform_(self.conv_h1.weight, gain=nn.init.calculate_gain('tanh'))
-        self.conv_h1.bias.data.zero_()
-        nn.init.xavier_uniform_(self.conv_h2.weight, gain=nn.init.calculate_gain('tanh'))
-        self.conv_h2.bias.data.zero_()
-
-        if self.batchnorm:
-            self.bn1.reset_parameters()
-            self.bn2.reset_parameters()
-
-
-class ConvGRU(nn.Module):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, num_layers, batch_first=True, bias=True, activation=F.tanh, batchnorm=False):
-        super(ConvGRU, self).__init__()
-
-        self._check_kernel_size_consistency(kernel_size)
-
-        # Make sure that both `kernel_size` and `hidden_dim` are lists having len == num_layers
-        kernel_size = self._extend_for_multilayer(kernel_size, num_layers)
-        hidden_dim  = self._extend_for_multilayer(hidden_dim, num_layers)
-        activation  = self._extend_for_multilayer(activation, num_layers)
-
-        if not len(kernel_size) == len(hidden_dim) == len(activation) == num_layers:
-            raise ValueError('Inconsistent list length.')
-
-        self.height, self.width = input_size
-
-        self.input_dim  = input_dim
-        self.hidden_dim = hidden_dim
-        self.kernel_size = kernel_size
-        self.num_layers = num_layers
-        self.batch_first = batch_first
-        self.bias = bias
-
-        cell_list = []
-        for i in range(0, self.num_layers):
-            cur_input_dim = self.input_dim if i == 0 else self.hidden_dim[i-1]
-
-            cell_list.append(ConvGRUCell(input_size=(self.height, self.width),
-                                          input_dim=cur_input_dim,
-                                          hidden_dim=self.hidden_dim[i],
-                                          kernel_size=self.kernel_size[i],
-                                          bias=self.bias,
-                                          activation=activation[i],
-                                          batchnorm=batchnorm))
-
-        self.cell_list = nn.ModuleList(cell_list)
-
-        self.reset_parameters()
-
-    def forward(self, input, hidden_state):
-        """
-
-        Parameters
-        ----------
-        input_tensor:
-            5-D Tensor either of shape (t, b, c, h, w) or (b, t, c, h, w)
-        hidden_state:
-        Returns
-        -------
-        last_state_list, layer_output
-        """
-        cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
-
-        if not hidden_state:
-            hidden_state = self.get_init_states(cur_layer_input[0].size(0))
-
-        seq_len = len(cur_layer_input)
-
-        layer_output_list = []
-        last_state_list   = []
-
-        for layer_idx in range(self.num_layers):
-            h = hidden_state[layer_idx]
-            output_inner = []
-            for t in range(seq_len):
-                h = self.cell_list[layer_idx](input=cur_layer_input[t],
-                                                 h_prev=h)
-                output_inner.append(h)
-
-            cur_layer_input = output_inner
-            last_state_list.append(h)
-
-        layer_output = torch.stack(output_inner, dim=int(self.batch_first))
-        last_state_list = torch.stack(last_state_list, dim=int(self.batch_first))
-
-        return layer_output, last_state_list
-
-    def reset_parameters(self):
-        for c in self.cell_list:
-            c.reset_parameters()
-
-    def get_init_states(self, batch_size, cuda=True):
-        init_states = []
-        for i in range(self.num_layers):
-            init_states.append(self.cell_list[i].init_hidden(batch_size, cuda))
-        return init_states
 
     @staticmethod
     def _check_kernel_size_consistency(kernel_size):
@@ -380,39 +77,208 @@ class ConvGRU(nn.Module):
         if not isinstance(param, list):
             param = [param] * num_layers
         return param
+
+# Convolution variants
+class DepthwiseSeparableConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding=0, bias=True, dilation=1):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, 
+                                 padding=padding, groups=in_channels, bias=False, dilation=dilation)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=bias)
     
-# Custom RNNs for handling 5D tensors (B, T, C, H, W) and for transformers
+    def forward(self, x):
+        return self.pointwise(self.depthwise(x))
 
-class LSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=1, bias=True, batch_first=True, dropout=0.0, bidirectional=False, **kwargs):
-        super(LSTM, self).__init__()
-        kwargs.pop('input_size', None)
-        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, num_layers=num_layers,
-                            bias=bias, batch_first=batch_first, dropout=dropout, bidirectional=bidirectional)
+class TTConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding=0, bias=True, tt_rank=8, dilation=1):
+        super().__init__()
+        mid_channels = min(tt_rank, in_channels, out_channels)
+        self.tt_cores = nn.ModuleList([
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=kernel_size, padding=padding, bias=False, dilation=dilation),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=bias)
+        ])
+    
+    def forward(self, x):
+        for core in self.tt_cores:
+            x = core(x)
+        return x
 
-    def forward(self, x, hidden=None):
-        # x: (B, T, C, H, W)
-        x = x.permute(0, 3, 4, 1, 2)  # (B, H, W, T, C)
-        B, H, W, T, C = x.shape
-        x = x.reshape(-1, T, C)  # (B*H*W, T, C)
-        output, hidden = self.lstm(x, hidden)
-        output = output.reshape(B, H, W, T, -1)  # (B, H, W, T, hidden_size)
-        output = output.permute(0, 3, 4, 1, 2)  # (B, T, hidden_size, H, W)
-        return output, hidden
+# ConvLSTM Cells
+class ConvLSTMCell(BaseConvRNNCell):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+                 activation=F.tanh, peephole=False, conv_type='standard', dilation=1, **kwargs):
+        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        self.peephole = peephole
+        
+        if peephole:
+            self.Wci = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
+            self.Wcf = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
+            self.Wco = nn.Parameter(torch.FloatTensor(hidden_dim, self.height, self.width))
 
+        conv_classes = {
+            'standard': nn.Conv2d,
+            'depthwise': DepthwiseSeparableConv2d,
+            'tt': TTConv2d
+        }
+        
+        conv_class = conv_classes.get(conv_type, nn.Conv2d)
+        conv_kwargs = {'kernel_size': kernel_size, 'padding': self.padding, 'bias': bias, 'dilation': dilation}
+        if conv_type == 'tt':
+            conv_kwargs.update(kwargs)
+        
+        self.conv = conv_class(input_dim + hidden_dim, 4 * hidden_dim, **conv_kwargs)
+        self.reset_parameters()
 
-class GRU(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=1, bias=True, batch_first=True, dropout=0.0, bidirectional=False, **kwargs):
-        super(GRU, self).__init__()
-        self.gru = nn.GRU(input_size=input_dim, hidden_size=hidden_dim, num_layers=num_layers,
-                          bias=bias, batch_first=batch_first, dropout=dropout, bidirectional=bidirectional)
+    def forward(self, input, prev_state):
+        h_prev, c_prev = prev_state
+        combined = torch.cat((input, h_prev), dim=1)
+        combined_conv = self.conv(combined)
+        cc_i, cc_f, cc_o, cc_g = torch.split(combined_conv, self.hidden_dim, dim=1)
 
-    def forward(self, x, hidden=None):
-        # x: (B, T, C, H, W)
-        x = x.permute(0, 3, 4, 1, 2)  # (B, H, W, T, C)
-        B, H, W, T, C = x.shape
-        x = x.reshape(-1, T, C)  # (B*H*W, T, C)
-        output, hidden = self.gru(x, hidden)
-        output = output.reshape(B, H, W, T, -1)  # (B, H, W, T, hidden_size)
-        output = output.permute(0, 3, 4, 1, 2)  # (B, T, hidden_size, H, W)
-        return output, hidden
+        if self.peephole:
+            i = F.sigmoid(cc_i + self.Wci * c_prev)
+            f = F.sigmoid(cc_f + self.Wcf * c_prev)
+            o = F.sigmoid(cc_o + self.Wco * (f * c_prev + i * self.activation(cc_g)))
+        else:
+            i, f, o = F.sigmoid(cc_i), F.sigmoid(cc_f), F.sigmoid(cc_o)
+
+        c_cur = f * c_prev + i * self.activation(cc_g)
+        h_cur = o * self.activation(c_cur)
+        return h_cur, c_cur
+
+    def init_hidden(self, batch_size, cuda=True, device='cuda'):
+        state = (torch.zeros(batch_size, self.hidden_dim, self.height, self.width),
+                 torch.zeros(batch_size, self.hidden_dim, self.height, self.width))
+        return (state[0].to(device), state[1].to(device)) if cuda else state
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        if self.peephole:
+            for param in [self.Wci, self.Wcf, self.Wco]:
+                param.data.uniform_(0, 1)
+
+# ConvGRU Cells
+class ConvGRUCell(BaseConvRNNCell):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+                 activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
+        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        
+        conv_classes = {
+            'standard': nn.Conv2d,
+            'depthwise': DepthwiseSeparableConv2d,
+            'tt': TTConv2d
+        }
+        conv_class = conv_classes.get(conv_type, nn.Conv2d)
+        
+        conv_kwargs = {'kernel_size': kernel_size, 'padding': self.padding, 'bias': bias, 'dilation': dilation}
+        if conv_type == 'tt':
+            conv_kwargs.update(kwargs)
+        
+        self.conv_zr = conv_class(input_dim + hidden_dim, 2 * hidden_dim, **conv_kwargs)
+        self.conv_h1 = conv_class(input_dim, hidden_dim, **conv_kwargs)
+        self.conv_h2 = conv_class(hidden_dim, hidden_dim, **conv_kwargs)
+        self.reset_parameters()
+
+    def forward(self, input, h_prev):
+        combined = torch.cat((input, h_prev), dim=1)
+        z, r = torch.split(F.sigmoid(self.conv_zr(combined)), self.hidden_dim, dim=1)
+        h_ = self.activation(self.conv_h1(input) + r * self.conv_h2(h_prev))
+        return (1 - z) * h_ + z * h_prev
+
+    def init_hidden(self, batch_size, cuda=True, device='cuda'):
+        state = torch.zeros(batch_size, self.hidden_dim, self.height, self.width)
+        return state.to(device) if cuda else state
+
+# Main RNN classes
+class ConvLSTM(BaseConvRNN):
+    def __init__(self, **kwargs):
+        super().__init__(cell_class=ConvLSTMCell, **kwargs)
+
+    def forward(self, input, hidden_state):
+        cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
+        
+        if hidden_state is None:
+            hidden_state = self.get_init_states(cur_layer_input[0].size(int(not self.batch_first)))
+
+        for layer_idx in range(self.num_layers):
+            h, c = hidden_state[layer_idx]
+            output_inner = []
+            for t in range(len(cur_layer_input)):
+                h, c = self.cell_list[layer_idx](cur_layer_input[t], [h, c])
+                output_inner.append(h)
+            cur_layer_input = output_inner
+            hidden_state[layer_idx] = (h, c)
+
+        return torch.stack(output_inner, dim=int(self.batch_first)), hidden_state
+
+    def get_init_states(self, batch_size, cuda=True, device='cuda'):
+        return [self.cell_list[i].init_hidden(batch_size, cuda, device) for i in range(self.num_layers)]
+
+class ConvGRU(BaseConvRNN):
+    def __init__(self, **kwargs):
+        super().__init__(cell_class=ConvGRUCell, **kwargs)
+
+    def forward(self, input, hidden_state):
+        cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
+        
+        if hidden_state is None:
+            hidden_state = self.get_init_states(cur_layer_input[0].size(0))
+
+        for layer_idx in range(self.num_layers):
+            h = hidden_state[layer_idx]
+            output_inner = []
+            for t in range(len(cur_layer_input)):
+                h = self.cell_list[layer_idx](cur_layer_input[t], h)
+                output_inner.append(h)
+            cur_layer_input = output_inner
+            hidden_state[layer_idx] = h
+
+        return torch.stack(output_inner, dim=int(self.batch_first)), hidden_state
+
+    def get_init_states(self, batch_size, cuda=True, device='cuda'):
+        return [self.cell_list[i].init_hidden(batch_size, cuda, device) for i in range(self.num_layers)]
+
+class AttentionRNN(nn.Module):
+    def __init__(self, channels, input_size, kernel_size=7, rnn_type="LSTM"):
+        super().__init__()
+        
+        # Channel attention with RNN
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        if rnn_type in ("LSTM", "ConvLSTM"):
+            self.channel_rnn = nn.LSTM(channels, channels, batch_first=True)
+            self.spatial_rnn = ConvLSTM(input_size, 2, 1, (kernel_size, kernel_size), bias=False)
+        else:
+            self.channel_rnn = nn.GRU(channels, channels, batch_first=True)
+            self.spatial_rnn = ConvGRU(input_size, 2, 1, (kernel_size, kernel_size), bias=False)
+        
+    def forward(self, x, h_channel=None, h_spatial=None):
+        # Channel attention
+        avg_out, h_channel = self.channel_rnn(self.avg_pool(x).flatten(2), h_channel)
+        max_out, _ = self.channel_rnn(self.max_pool(x).flatten(2), h_channel)
+        x = x * torch.sigmoid(avg_out + max_out).unsqueeze(-1).unsqueeze(-1)
+        
+        # Spatial attention
+        spatial_att, h_spatial = self.spatial_rnn(torch.cat([x.mean(dim=2, keepdim=True), x.max(dim=2, keepdim=True)[0]], dim=2), h_spatial)
+        
+        return x * torch.sigmoid(spatial_att), (h_channel, h_spatial)
+
+# Factory functions for different variants
+def SepConvLSTM(**kwargs):
+    return ConvLSTM(conv_type='depthwise', **kwargs)
+
+def TTConvLSTM(**kwargs):
+    return ConvLSTM(conv_type='tt', **kwargs)
+
+def SepConvGRU(**kwargs):
+    return ConvGRU(conv_type='depthwise', **kwargs)
+
+def TTConvGRU(**kwargs):
+    return ConvGRU(conv_type='tt', **kwargs)
+
+def AttentionLSTM(**kwargs):
+    return AttentionRNN(rnn_type="LSTM", **kwargs)
+
+def AttentionGRU(**kwargs):
+    return AttentionRNN(rnn_type="GRU", **kwargs)

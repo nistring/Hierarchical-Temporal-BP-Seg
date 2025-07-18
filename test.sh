@@ -1,4 +1,4 @@
-for i in 1_30; do
+for i in 1_46; do
     # Run GE_val on GPU 0
     python main.py --config_file lightning_logs/config$i/config.yaml \
         --mode "test" \

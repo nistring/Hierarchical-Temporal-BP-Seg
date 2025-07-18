@@ -20,188 +20,162 @@ class SaveConfigCallback(Callback):
         self.model_config = model_config
 
     def on_train_start(self, trainer, pl_module):
-        # Save the configuration file at the start of training
-        config_path = os.path.join(trainer.log_dir, "config.yaml")
-        with open(config_path, "w") as f:
-            yaml.dump(self.config, f)
-        
-        # Calculate and save model summary and FLOPs
+        # Save config and model info
+        self._save_config(trainer.log_dir)
         self._save_model_info(trainer, pl_module)
     
+    def _save_config(self, log_dir):
+        with open(os.path.join(log_dir, "config.yaml"), "w") as f:
+            yaml.dump(self.config, f)
+    
     def _save_model_info(self, trainer, pl_module):
-
-        # Get model input dimensions
-        sequence_length = self.config["model"]["sequence_length"]
-        image_size = self.config["model"]["image_size"]
-        
-        # Calculate FLOPs using meta device
+        cfg = self.config["model"]
         with torch.no_grad():
-            x = torch.randn(1, 1, 1, image_size[0], image_size[1], device=pl_module.device)
-            # Use the pl_module directly instead of creating a meta model
-            model_fwd = lambda: pl_module.model(x)
-            fwd_flops = measure_flops(pl_module.model, model_fwd)
-        del x, model_fwd
-        # Get model summary
-        model_summary = summarize(pl_module, max_depth=3)
+            x = torch.randn(1, 1, 1, *cfg["image_size"], device=pl_module.device)
+            fwd_flops = measure_flops(pl_module.model, lambda: pl_module.model(x))
         
-        # Save model info to file
         info_path = os.path.join(trainer.log_dir, "model_info.txt")
         with open(info_path, "w") as f:
-            f.write("Model Summary and FLOPs Information\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(str(model_summary))
-            f.write(f"\n\nFLOPs Information:\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"Input shape: (1, {sequence_length}, 3, {image_size[0]}, {image_size[1]})\n")
-            f.write(f"Forward FLOPs: {fwd_flops:,}\n")
-            f.write(f"Forward GFLOPs: {fwd_flops / 1e9:.2f}\n")
-                
+            f.write("Model Summary and FLOPs Information\n" + "=" * 50 + "\n\n")
+            f.write(str(summarize(pl_module, max_depth=3)))
+            f.write(f"\n\nFLOPs Information:\n" + "-" * 20 + "\n")
+            f.write(f"Input shape: (1, {cfg['sequence_length']}, 3, {cfg['image_size'][0]}, {cfg['image_size'][1]})\n")
+            f.write(f"Forward FLOPs: {fwd_flops:,}\nForward GFLOPs: {fwd_flops / 1e9:.2f}\n")
 
-def main(config, best_model_path=None):
-    """
-    Main function to train the segmentation model.
-    
-    Args:
-        config (dict): Configuration dictionary.
-        best_model_path (str): Path to the best model checkpoint.
-    """
-    test = config.get("mode", "train") == "test"
 
-    # Initialize datasets
-    train_dataset = UltrasoundTrainDataset(
-        Path(config["data"]["train_data_path"]),
-        Path(config["data"]["train_annotations_path"]),
-        sequence_length=config["model"]["sequence_length"],
-        image_size=tuple(config["model"]["image_size"]),
-        batch_size=config["data"]["batch_size"],
-        truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
-    )
-    val_dataset = UltrasoundTrainDataset(
-        Path(config["data"]["val_data_path"]),
-        Path(config["data"]["val_annotations_path"]),
-        sequence_length=config["model"]["sequence_length"],
-        image_size=tuple(config["model"]["image_size"]),
-        batch_size=config["data"]["batch_size"],
-        truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
-        train=False,
-    )
-    test_dataset = UltrasoundTestDataset(
-        Path(config["data"]["test_data_path"]),
-        Path(config["data"]["test_annotations_path"]),
-        sequence_length=50, # Use a fixed sequence length for testing, 5 seconds
-        image_size=tuple(config["model"]["image_size"]),
-        batch_size=1,
-    )
-
-    # Initialize the model and trainer
-    model_config = {
-        "encoder_name": config["model"]["encoder_name"],
-        "segmentation_model_name": config["model"]["segmentation_model_name"],
-        "num_classes": config["model"]["num_classes"],
-        "temporal_model": config["model"]["temporal_model"],
-        "image_size": tuple(config["model"]["image_size"]),
-        "encoder_depth": config["model"]["encoder_depth"],
-        "temporal_depth": config["model"]["temporal_depth"],
-        "freeze_encoder": config["model"].get("freeze_encoder", False),
+def create_datasets(config):
+    """Create train, validation, and test datasets."""
+    data_cfg, model_cfg = config["data"], config["model"]
+    common_params = {
+        "sequence_length": model_cfg["sequence_length"],
+        "image_size": tuple(model_cfg["image_size"]),
+        "batch_size": data_cfg["batch_size"],
     }
     
-    # Add any additional model arguments from config
-    if "model_kwargs" in config["model"]:
-        model_config.update(config["model"]["model_kwargs"])
+    train_dataset = UltrasoundTrainDataset(
+        Path(data_cfg["train_data_path"]), Path(data_cfg["train_annotations_path"]),
+        truncated_bptt_steps=model_cfg["truncated_bptt_steps"], **common_params
+    )
+    val_dataset = UltrasoundTrainDataset(
+        Path(data_cfg["val_data_path"]), Path(data_cfg["val_annotations_path"]),
+        truncated_bptt_steps=model_cfg["truncated_bptt_steps"], train=False, **common_params
+    )
+    test_dataset = UltrasoundTestDataset(
+        Path(data_cfg["test_data_path"]), Path(data_cfg["test_annotations_path"]),
+        sequence_length=model_cfg["sequence_length"], image_size=tuple(model_cfg["image_size"]), batch_size=1
+    )
+    
+    return train_dataset, val_dataset, test_dataset
+
+
+def main(config, best_model_path=None):
+    test_mode = config.get("mode") == "test"
+    train_dataset, val_dataset, test_dataset = create_datasets(config)
+
+    # Create model
+    model_cfg = config["model"]
+    model_config = {
+        "encoder_name": model_cfg["encoder_name"],
+        "segmentation_model_name": model_cfg["segmentation_model_name"],
+        "num_classes": model_cfg["num_classes"],
+        "temporal_model": model_cfg["temporal_model"],
+        "image_size": tuple(model_cfg["image_size"]),
+        "encoder_depth": model_cfg["encoder_depth"],
+        "temporal_depth": model_cfg["temporal_depth"],
+        "freeze_encoder": model_cfg.get("freeze_encoder", False),
+        "num_layers": model_cfg.get("num_layers", 1),
+        **model_cfg.get("model_kwargs", {})
+    }
     
     model = TemporalSegmentationModel(**model_config)
-    if config["trainer"].get("ckpt_path", False):
+    if config["trainer"].get("ckpt_path"):
         model = load_model(model, config["trainer"]["ckpt_path"])
 
+    # Create trainer module
     lit_module = SegmentationTrainer(
-        model,
-        train_dataset,
-        val_dataset,
-        test_dataset,
+        model, train_dataset, val_dataset, test_dataset,
         batch_size=config["data"]["batch_size"],
-        learning_rate=config["model"]["learning_rate"],
+        learning_rate=model_cfg["learning_rate"],
         num_workers=config["data"]["num_workers"],
-        sequence_length=config["model"]["sequence_length"],
-        image_size=tuple(config["model"]["image_size"]),
-        truncated_bptt_steps=config["model"]["truncated_bptt_steps"] if not test else 12, # Use 12 for testing
-        logdir=Path(best_model_path).parent.parent if best_model_path else best_model_path,
-        alpha=config["model"]["alpha"],
-        encoder_depth=config["model"]["encoder_depth"],
-        temporal_depth=config["model"]["temporal_depth"],
-        temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),
-        sparsity_weight= config["model"].get("sparsity_weight", 0.0),
-        ckpt_path=True if config["trainer"].get("ckpt_path", False) else False,
+        sequence_length=model_cfg["sequence_length"],
+        image_size=tuple(model_cfg["image_size"]),
+        truncated_bptt_steps=12 if test_mode else model_cfg["truncated_bptt_steps"],
+        logdir=Path(best_model_path).parent.parent if best_model_path else None,
+        alpha=model_cfg["alpha"],
+        encoder_depth=model_cfg["encoder_depth"],
+        temporal_depth=model_cfg["temporal_depth"],
+        temporal_loss_weight=model_cfg.get("temporal_loss_weight", 0.3),
+        sparsity_weight=model_cfg.get("sparsity_weight", 0.0),
+        ckpt_path=bool(config["trainer"].get("ckpt_path")),
     )
 
-    # Set torch precision for matrix multiplication
     torch.set_float32_matmul_precision("high")
 
-    callbacks=[
+    # Setup trainer
+    trainer_cfg = config["trainer"]
+    callbacks = [
         ModelCheckpoint(monitor=config["logging"]["monitor"], mode=config["logging"]["mode"], save_last=True),
         LearningRateMonitor(logging_interval="epoch"),
         SaveConfigCallback(config, model_config),
         StochasticWeightAveraging(
-            swa_epoch_start=config["trainer"]["max_epochs"] - 10,
-            swa_lrs=0.5 * config["model"]["learning_rate"],
+            swa_epoch_start=trainer_cfg["max_epochs"] - 10,
+            swa_lrs=0.5 * model_cfg["learning_rate"],
             annealing_epochs=5
         )
     ]
 
-    # Initialize the trainer
     trainer = L.Trainer(
-        strategy=DDPStrategy(
-            static_graph=False,
-            gradient_as_bucket_view=True
-        ),
-        # strategy="ddp_find_unused_parameters_true",
-        max_epochs=config["trainer"]["max_epochs"],
-        devices=config["trainer"]["gpus"],
+        strategy=DDPStrategy(static_graph=False, gradient_as_bucket_view=True, find_unused_parameters=False),
+        max_epochs=trainer_cfg["max_epochs"],
+        devices=trainer_cfg["gpus"],
         callbacks=callbacks,
         precision="bf16-mixed",
         sync_batchnorm=True,
-        accumulate_grad_batches=config["trainer"]["accumulate_grad_batches"],
+        accumulate_grad_batches=trainer_cfg["accumulate_grad_batches"],
         use_distributed_sampler=False,
-        logger=False if test else TensorBoardLogger(save_dir="./",version=config["config_file"].split("/")[-1].split(".")[0]),
+        logger=False if test_mode else TensorBoardLogger(save_dir="./", version=config["config_file"].split("/")[-1].split(".")[0]),
     )
 
-    if test:
-        # Load the best checkpoint before testing
+    if test_mode:
         trainer.test(lit_module, ckpt_path=best_model_path)
     else:
-        # Start training
         trainer.fit(lit_module)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train or test the segmentation model.")
-    parser.add_argument("--config_file", type=str, help="Path to the configuration file.")
-    parser.add_argument("--mode", type=str, choices=["train", "test"], default="train", help="Mode to run: train or test.")
+    parser.add_argument("--config_file", type=str, required=True, help="Path to the configuration file.")
+    parser.add_argument("--mode", type=str, choices=["train", "test"], default="train")
     parser.add_argument("--best_model_path", type=str, help="Path to the best model checkpoint for testing.")
     parser.add_argument("--test_data_path", type=str, help="Path to the test data directory.")
     parser.add_argument("--test_annotations_path", type=str, help="Path to the test annotations file.")
-    parser.add_argument("--gpu", type=int, help="GPU device ID to use. Only for test step.")
+    parser.add_argument("--gpu", type=int, help="GPU device ID to use.")
     args = parser.parse_args()
     
-    # Load configuration from file
     with open(args.config_file, "r") as f:
         config = yaml.safe_load(f)
 
+    # Apply command line overrides
+    config.update({
+        "config_file": args.config_file,
+        "mode": args.mode,
+        "best_model_path": args.best_model_path
+    })
+    
     if args.gpu:
         config["trainer"]["gpus"] = (args.gpu,)
-    # Set the mode and best model path in the config
     
-    config["config_file"] = args.config_file
-    config["mode"] = args.mode
-    if args.best_model_path:
-        config["best_model_path"] = args.best_model_path
-    
-    # Override test paths if provided
     if args.test_data_path and args.test_annotations_path:
-        config["data"]["test_data_path"] = args.test_data_path
-        config["data"]["test_annotations_path"] = args.test_annotations_path
+        config["data"].update({
+            "test_data_path": args.test_data_path,
+            "test_annotations_path": args.test_annotations_path
+        })
     elif args.test_data_path or args.test_annotations_path:
         raise ValueError("Both test_data_path and test_annotations_path must be provided.")
     else:
-        config["data"]["test_data_path"] = config["data"]["val_data_path"]
-        config["data"]["test_annotations_path"] = config["data"]["val_annotations_path"]
+        config["data"].update({
+            "test_data_path": config["data"]["val_data_path"],
+            "test_annotations_path": config["data"]["val_annotations_path"]
+        })
         
     main(config, best_model_path=args.best_model_path)
