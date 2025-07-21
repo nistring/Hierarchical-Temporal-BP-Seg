@@ -177,3 +177,4 @@ lightning_logs
 *.pt
 nohup.out
 *.yaml
+visualize*

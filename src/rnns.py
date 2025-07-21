@@ -240,29 +240,40 @@ class ConvGRU(BaseConvRNN):
         return [self.cell_list[i].init_hidden(batch_size, cuda, device) for i in range(self.num_layers)]
 
 class AttentionRNN(nn.Module):
-    def __init__(self, channels, input_size, kernel_size=7, rnn_type="LSTM"):
+    def __init__(self, rnn_type="LSTM", **kwargs):
         super().__init__()
         
-        # Channel attention with RNN
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        if rnn_type in ("LSTM", "ConvLSTM"):
-            self.channel_rnn = nn.LSTM(channels, channels, batch_first=True)
-            self.spatial_rnn = ConvLSTM(input_size, 2, 1, (kernel_size, kernel_size), bias=False)
-        else:
-            self.channel_rnn = nn.GRU(channels, channels, batch_first=True)
-            self.spatial_rnn = ConvGRU(input_size, 2, 1, (kernel_size, kernel_size), bias=False)
+        rnn_class = ConvLSTM if rnn_type in ("LSTM", "ConvLSTM") else ConvGRU
+        channel_rnn_class = nn.LSTM if rnn_type in ("LSTM", "ConvLSTM") else nn.GRU
         
-    def forward(self, x, h_channel=None, h_spatial=None):
+        self.spatial_rnn = rnn_class(
+            input_size=kwargs["input_size"], 
+            input_dim=2, 
+            hidden_dim=1, 
+            **{k: v for k, v in kwargs.items() if k not in ["input_size", "input_dim", "hidden_dim", "bias"]},
+            bias=False
+        )
+        self.channel_rnn = channel_rnn_class(
+            input_size=kwargs['input_dim'], 
+            hidden_size=kwargs['hidden_dim'], 
+            num_layers=kwargs["num_layers"], 
+            bias=False, 
+            batch_first=True
+        )
+
+    def forward(self, x, h=None):
+        h_avg, h_max, h_spatial = h if h is not None else (None, None, None)
+
         # Channel attention
-        avg_out, h_channel = self.channel_rnn(self.avg_pool(x).flatten(2), h_channel)
-        max_out, _ = self.channel_rnn(self.max_pool(x).flatten(2), h_channel)
+        avg_out, h_avg = self.channel_rnn(x.mean((3, 4)), h_avg)
+        max_out, h_max = self.channel_rnn(x.amax((3, 4)), h_max)
         x = x * torch.sigmoid(avg_out + max_out).unsqueeze(-1).unsqueeze(-1)
-        
+
         # Spatial attention
-        spatial_att, h_spatial = self.spatial_rnn(torch.cat([x.mean(dim=2, keepdim=True), x.max(dim=2, keepdim=True)[0]], dim=2), h_spatial)
-        
-        return x * torch.sigmoid(spatial_att), (h_channel, h_spatial)
+        spatial_input = torch.cat([x.mean(dim=2, keepdim=True), x.max(dim=2, keepdim=True)[0]], dim=2)
+        spatial_att, h_spatial = self.spatial_rnn(spatial_input, h_spatial)
+
+        return x * torch.sigmoid(spatial_att), (h_avg, h_max, h_spatial)
 
 # Factory functions for different variants
 def SepConvLSTM(**kwargs):

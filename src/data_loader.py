@@ -66,16 +66,19 @@ class UltrasoundTrainDataset(BaseUltrasoundDataset):
         img_list = []
         for video_id, img_ids in self.video_id_to_img_ids.items():
             start = random.randint(-(self.total_seq_len % len(img_ids)), 0) + len(img_ids) if self.train else 0
-            reversed_order = self.train and random.random() > 0.5
-            
+            if self.train and random.random() > 0.5:
+                bi_img_ids = img_ids[::-1] + img_ids
+            else:
+                bi_img_ids = img_ids + img_ids[::-1]
+
             for i in range(self.truncated_bptt_steps):
                 end = start + self.sequence_length
-                if end >= len(img_ids):
-                    end -= len(img_ids)
-                    sampled_ids = img_ids[start:] + img_ids[:end]
+                if end >= len(bi_img_ids):
+                    end -= len(bi_img_ids)
+                    sampled_ids = bi_img_ids[start:] + bi_img_ids[:end]
                 else:
-                    sampled_ids = img_ids[start:end]
-                img_list.append((video_id, sampled_ids[::-1] if reversed_order else sampled_ids))
+                    sampled_ids = bi_img_ids[start:end]
+                img_list.append((video_id, sampled_ids))
                 start = end
         self.img_list = img_list
 

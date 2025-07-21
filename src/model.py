@@ -20,12 +20,12 @@ sys.path.append("./")
 import src.rnns as rnns
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
-from src.losses import TemporalConsistencyLoss, SparsityLoss
+from src.losses import PerceptualConsistencyLoss, SparsityLoss
 
 class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size,
                  temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1,
-                 freeze_encoder=False, **model_kwargs):
+                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, **model_kwargs):
         super().__init__()
         assert encoder_depth > temporal_depth, "Encoder depth should be greater than temporal depth."
         
@@ -55,8 +55,8 @@ class TemporalSegmentationModel(nn.Module):
         for i, out_channel in enumerate(self.encoder.out_channels[base_depth:base_depth + temporal_depth]):
             kwargs = {
                 "input_size": (h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
-                "input_dim": out_channel, "hidden_dim": out_channel, "kernel_size": (3, 3),
-                "num_layers": num_layers, "dilation": 2, "batch_first": True,
+                "input_dim": out_channel, "hidden_dim": out_channel, "kernel_size": kernel_size,
+                "num_layers": num_layers, "dilation": dilation, "batch_first": True,
             }
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
             self.temporal_models.append(temporal_class(**kwargs))
@@ -66,21 +66,22 @@ class TemporalSegmentationModel(nn.Module):
         x = x.reshape(batch_size * seq_len, c, h, w)
 
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
-
-        if not self.temporal_models:
-            temporal_outs = features
-        else:
-            temporal_outs = features[:2]
+        perceptual_features = features[:2]
+        
+        if self.temporal_models:
             hidden_state = hidden_state or [None] * len(self.temporal_models)
-            
             for i, temporal_model in enumerate(self.temporal_models):
-                temporal_out, hidden_state[i] = temporal_model(features[2 + i], hidden_state[i])
-                temporal_outs.append(temporal_out)
-            temporal_outs.extend(features[2 + len(self.temporal_models):])
+                feature, hidden_state[i] = temporal_model(features[2 + i], hidden_state[i])
+                perceptual_features.append(feature)
+            perceptual_features.extend(features[2 + len(self.temporal_models):])
+        else:
+            perceptual_features = features
 
-        temporal_outs = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_outs]
-        x = self.head(self.decoder(temporal_outs))
-        return x.reshape(batch_size, seq_len, *x.shape[1:]), hidden_state
+        out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in perceptual_features]
+        out = self.head(self.decoder(out))
+        out = out.reshape(batch_size, seq_len, *out.shape[1:])
+
+        return out, hidden_state, perceptual_features[-1]
 
 
 class SegmentationTrainer(L.LightningModule):
@@ -119,7 +120,7 @@ class SegmentationTrainer(L.LightningModule):
         # Loss functions
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
         self.loss_crossentropy = nn.CrossEntropyLoss()
-        self.loss_temporal = TemporalConsistencyLoss()
+        self.loss_temporal = PerceptualConsistencyLoss()
         self.loss_sparsity = SparsityLoss()
 
     def show_batch(self, win_size=(80, 100), save=True):
@@ -183,24 +184,25 @@ class SegmentationTrainer(L.LightningModule):
             return optimizer
             
         warmup_steps = int(len(self.train_dataset) / self.batch_size / self.trainer.num_devices / 
-                          self.trainer.accumulate_grad_batches * 5)
+                          self.trainer.accumulate_grad_batches * 3)
         scheduler = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps)
         
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1}}
 
     def compute_loss(self, batch, batch_idx, stage):
         images, targets = batch
-        masks, self.hidden_state = self.model(images, self.hidden_state)
+        
+        # Get predictions and temporal feature
+        masks, self.hidden_state, feature = self.model(images, self.hidden_state)
 
-        masks_original = masks
-        masks = masks.reshape(-1, *masks.shape[2:])
+        masks_flatten = masks.reshape(-1, *masks.shape[2:])
         targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:]).long()
         
         losses = {
-            'tversky': self.loss_tversky(masks, targets),
-            'crossentropy': self.loss_crossentropy(masks, targets),
-            'temporal': self.loss_temporal(masks_original),
-            'sparsity': self.loss_sparsity(masks)
+            'tversky': self.loss_tversky(masks_flatten, targets),
+            'crossentropy': self.loss_crossentropy(masks_flatten, targets),
+            'temporal': self.loss_temporal(masks, feature),
+            'sparsity': self.loss_sparsity(masks_flatten)
         }
         
         total_loss = (losses['tversky'] + self.alpha * losses['crossentropy'] + 
@@ -218,7 +220,17 @@ class SegmentationTrainer(L.LightningModule):
         if batch_idx % self.truncated_bptt_steps == 0:
             self.hidden_state = None
         elif self.temporal_depth > 0 and self.hidden_state:
-            self.hidden_state = [[h.detach() for h in hs] for hs in self.hidden_state]
+            def detach_nested(item):
+                if isinstance(item, list):
+                    return [detach_nested(sub_item) for sub_item in item]
+                elif isinstance(item, tuple):
+                    return tuple(detach_nested(sub_item) for sub_item in item)
+                elif isinstance(item, torch.Tensor):
+                    return item.detach()
+                else:
+                    return item
+            
+            self.hidden_state = detach_nested(self.hidden_state)
 
     def training_step(self, batch, batch_idx):
         return self.compute_loss(batch, batch_idx, "train")
@@ -234,8 +246,8 @@ class SegmentationTrainer(L.LightningModule):
 
     def on_test_start(self):
         n = self.truncated_bptt_steps
-        self.metrics = {metric: [[[] for _ in range(n)] for _ in range(n)] 
-                       for metric in ['tp', 'fp', 'fn', 'tn']}
+        self.metrics = {metric: [] for metric in ['tp', 'fp', 'fn', 'tn', "video_id"]}
+
         self.video_id = None
         self.test_dataset_name = Path(self.test_dataset.data_dir).name
 
@@ -243,10 +255,10 @@ class SegmentationTrainer(L.LightningModule):
         images, targets = batch
         if self.video_id != targets["video_id"]:
             self.video_id = targets["video_id"]
-            self.hidden_states = []
-
-        if len(self.hidden_states) < self.truncated_bptt_steps:
-            self.hidden_states.append(None)
+            self.hidden_state = None
+            for metric in ['tp', 'fp', 'fn', 'tn']:
+                self.metrics[metric].append(torch.zeros(self.model.num_classes, device=self.device))
+            self.metrics["video_id"].append(self.video_id)
 
         targets["masks"] = F.one_hot(targets["masks"][0].long(), 
                                    num_classes=self.model.num_classes+1)[..., 1:].permute(0, 3, 1, 2)
@@ -258,44 +270,44 @@ class SegmentationTrainer(L.LightningModule):
             masks = torch.zeros_like(masks)
             masks.scatter_(1, masks_argmax, masks_sum)
             return smp.metrics.get_stats(masks, target_masks, mode="multilabel", threshold=0.5)
-        
-        for i, hidden_state in enumerate(self.hidden_states):
-            masks, self.hidden_states[i] = self.model(images, hidden_state)
-            tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
 
-            for j in range(i, len(self.hidden_states)):
-                self.metrics['tp'][i][j].append(tp)
-                self.metrics['fp'][i][j].append(fp)
-                self.metrics['fn'][i][j].append(fn)
-                self.metrics['tn'][i][j].append(tn)
+        masks, self.hidden_state, _ = self.model(images, self.hidden_state)
+        tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
+
+        self.metrics['tp'][-1] += tp.sum(0)
+        self.metrics['fp'][-1] += fp.sum(0)
+        self.metrics['fn'][-1] += fn.sum(0)
+        self.metrics['tn'][-1] += tn.sum(0)
 
     def on_test_epoch_end(self):
-        n = self.truncated_bptt_steps
-        results = {}
+        # Stack metrics
+        for metric in ['tp', 'fp', 'fn', 'tn']:
+            self.metrics[metric] = torch.stack(self.metrics[metric], dim=0)
+
+        # Calculate metrics
+        metric_functions = {
+            'iou_score': smp.metrics.iou_score,
+            'precision': smp.metrics.precision,
+            'sensitivity': smp.metrics.sensitivity,
+            'f1_score': smp.metrics.f1_score
+        }
         
-        for metric_name in ['iou_score', 'f1_score', 'precision', 'sensitivity']:
-            scores = torch.zeros(n, n, self.model.num_classes)
-            mean_scores = torch.zeros(n, n)
-            
-            for i in range(n):
-                for j in range(i, n):
-                    # Concatenate metrics
-                    tp = torch.cat(self.metrics['tp'][i][j])
-                    fp = torch.cat(self.metrics['fp'][i][j])
-                    fn = torch.cat(self.metrics['fn'][i][j])
-                    tn = torch.cat(self.metrics['tn'][i][j])
-                    
-                    tp_sum = tp.sum(0, keepdim=True)
-                    fp_sum = fp.sum(0, keepdim=True)
-                    fn_sum = fn.sum(0, keepdim=True)
-                    tn_sum = tn.sum(0, keepdim=True)
-                    
-                    metric_func = getattr(smp.metrics, metric_name)
-                    scores[i, j] = metric_func(tp_sum, fp_sum, fn_sum, tn_sum)[0].cpu().detach()
-                    mean_scores[i, j] = metric_func(tp, fp, fn, tn, reduction="micro").cpu().detach()
-            
-            results[metric_name] = scores.tolist()
-            results[f"mean_{metric_name}"] = mean_scores.tolist()
+        results = {}
+        for name, func in metric_functions.items():
+            values = func(self.metrics['tp'], self.metrics['fp'], self.metrics['fn'], self.metrics['tn']).mean(dim=0)
+            results[name] = values.cpu().tolist()
+            results[f'mean_{name}'] = values.mean().item()
+
+        # Create video-specific results
+        results["confusion_matrix"] = {
+            str(video_id): {
+            "tp": self.metrics["tp"][i].cpu().tolist(),
+            "fp": self.metrics["fp"][i].cpu().tolist(), 
+            "fn": self.metrics["fn"][i].cpu().tolist(),
+            "tn": self.metrics["tn"][i].cpu().tolist()
+            }
+            for i, video_id in enumerate(self.metrics["video_id"])
+        }
 
         # Save results
         logdir = Path(self.logdir)

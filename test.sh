@@ -1,28 +1,22 @@
-for i in 1_46; do
-    # Run GE_val on GPU 0
-    python main.py --config_file lightning_logs/config$i/config.yaml \
-        --mode "test" \
-        --best_model_path lightning_logs/config$i/checkpoints/last.ckpt \
-        --test_data_path ./data/SUIT/images/GE_val \
-        --test_annotations_path ./data/SUIT/coco_annotations/GE_val_updated.json \
-        --gpu 1 &
+#!/bin/bash
+
+# Array of config files
+configs=("no_temp" "sepGRU")
+
+# Run tests in parallel on different GPUs
+for i in "${!configs[@]}"; do
+    config="${configs[$i]}"
+    gpu=$i
     
-    # Run mindray_val on GPU 1
-    python main.py --config_file lightning_logs/config$i/config.yaml \
+    echo "Starting test for $config on GPU $gpu"
+    python3 main.py --config_file lightning_logs/$config/config.yaml \
         --mode "test" \
-        --best_model_path lightning_logs/config$i/checkpoints/last.ckpt \
-        --test_data_path ./data/SUIT/images/mindray_val \
-        --test_annotations_path ./data/SUIT/coco_annotations/mindray_val_updated.json \
-        --gpu 2 &
-    
-    # Run val on GPU 2
-    python main.py --config_file lightning_logs/config$i/config.yaml \
-        --mode "test" \
-        --best_model_path lightning_logs/config$i/checkpoints/last.ckpt \
+        --best_model_path lightning_logs/$config/checkpoints/last.ckpt \
         --test_data_path ./data/SUIT/images/val \
         --test_annotations_path ./data/SUIT/coco_annotations/val_updated.json \
-        --gpu 3
-    
-    # Wait for all background processes to complete
-    wait
+        --gpu $gpu &
 done
+
+# Wait for all background processes to complete
+wait
+echo "All tests completed"

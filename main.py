@@ -20,7 +20,6 @@ class SaveConfigCallback(Callback):
         self.model_config = model_config
 
     def on_train_start(self, trainer, pl_module):
-        # Save config and model info
         self._save_config(trainer.log_dir)
         self._save_model_info(trainer, pl_module)
     
@@ -84,6 +83,8 @@ def main(config, best_model_path=None):
         "temporal_depth": model_cfg["temporal_depth"],
         "freeze_encoder": model_cfg.get("freeze_encoder", False),
         "num_layers": model_cfg.get("num_layers", 1),
+        "kernel_size": tuple(model_cfg.get("kernel_size", [3, 3])),
+        "dilation": model_cfg.get("dilation", 1),
         **model_cfg.get("model_kwargs", {})
     }
     
@@ -118,9 +119,9 @@ def main(config, best_model_path=None):
         LearningRateMonitor(logging_interval="epoch"),
         SaveConfigCallback(config, model_config),
         StochasticWeightAveraging(
-            swa_epoch_start=trainer_cfg["max_epochs"] - 10,
+            swa_epoch_start=trainer_cfg["max_epochs"] - 7,
             swa_lrs=0.5 * model_cfg["learning_rate"],
-            annealing_epochs=5
+            annealing_epochs=4
         )
     ]
 

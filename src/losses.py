@@ -27,36 +27,64 @@ class SparsityLoss(nn.Module):
         
         return (h_var + w_var).mean()
 
-class TemporalConsistencyLoss(nn.Module):
-    """Temporal consistency loss for video segmentation."""
+class PerceptualConsistencyLoss(nn.Module):
+    """Perceptual Consistency Loss for video segmentation."""
+    """https://arxiv.org/pdf/2110.12385"""
     def __init__(self):
         super().__init__()
         
-    def forward(self, pred):
+    def forward(self, predictions, feature):
         """
-        Args: pred (torch.Tensor): Shape (B, T, C, H, W)
-        Returns: torch.Tensor: Temporal consistency loss
+        Args:
+            predictions: (B, T, C, H, W) segmentation logits
+            feature: (B, T, C_feat, H_feat, W_feat) feature tensor
         """
-        if pred.dim() != 5 or pred.shape[1] <= 1:
-            return torch.tensor(0.0, device=pred.device)
-        
-        pred_probs = F.softmax(pred, dim=2)
-        return torch.norm(pred_probs[:, 1:] - pred_probs[:, :-1], p=2, dim=2).mean()
+        predictions = F.softmax(predictions, dim=2)
 
-    """
-    Temporal Consistency Loss that enforces consistent predictions across frames.
-    
-    References:
-    - Nilsson, D., & Sminchisescu, C. (2018). Semantic video segmentation by gated recurrent
-      flow propagation. In Proceedings of the IEEE Conference on Computer Vision and Pattern
-      Recognition (CVPR).
-    - Lei, P., & Todorovic, S. (2018). Temporal deformable residual networks for
-      action segmentation in videos. In Proceedings of the IEEE Conference on Computer
-      Vision and Pattern Recognition (CVPR).
-    - Liu, Y., et al. (2019). Efficient Semantic Video Segmentation with Per-frame
-      Inference. In Proceedings of the IEEE International Conference on Computer Vision (ICCV).
-    Code References:
-    - https://github.com/tensorflow/models/blob/master/research/vid2depth/consistency_losses.py
-    - https://github.com/phoenix104104/fast_blind_video_consistency/blob/master/losses.py
-    - https://github.com/shelhamer/clockwork-fcn/blob/master/temporal_modules.py
-    """
+        loss = 0
+        C_feat, H_feat, W_feat = feature.shape[2:]
+        hw = H_feat * W_feat
+
+        # Normalize and reshape features
+        feat_a = F.normalize(feature[:, :-1].reshape(-1, C_feat, hw), dim=1)
+        feat_b = F.normalize(feature[:, 1:].reshape(-1, C_feat, hw), dim=1)
+
+        seg_a = predictions[:, :-1].reshape(-1, *predictions.shape[2:])
+        seg_b = predictions[:, 1:].reshape(-1, *predictions.shape[2:])
+
+        # Resize predictions if needed
+        if seg_a.shape[-2:] != (H_feat, W_feat):
+            seg_a = F.interpolate(seg_a, size=(H_feat, W_feat), mode='bilinear', align_corners=False)
+            seg_b = F.interpolate(seg_b, size=(H_feat, W_feat), mode='bilinear', align_corners=False)
+        
+        seg_a = seg_a.reshape(-1, seg_a.shape[1], hw)
+        seg_b = seg_b.reshape(-1, seg_b.shape[1], hw)
+
+        # for bt in range(feat_a.shape[0]):
+        #     # Compute correlations
+        #     corr = torch.matmul(feat_a[bt].T, feat_b[bt])
+        #     seg_corr = torch.matmul(seg_a[bt].T, seg_b[bt])
+            
+        #     # Consistency metrics for both dimensions
+        #     def consistency(corr, seg_corr, dim):
+        #         max_unconstrained = torch.max(corr, dim=dim)[0]
+        #         max_constrained = torch.max(corr * seg_corr, dim=dim)[0]
+        #         mean_corr = torch.mean(corr, dim=dim)
+        #         return (max_constrained - mean_corr) / (max_unconstrained - mean_corr)
+            
+        #     loss += torch.min(consistency(corr, seg_corr, 1), consistency(corr, seg_corr, 0)).mean()
+
+        # Compute correlations
+        corr = torch.bmm(feat_a.transpose(1, 2), feat_b)
+        seg_corr = torch.bmm(seg_a.transpose(1, 2), seg_b)
+        
+        # Consistency metrics for both dimensions
+        def consistency(corr, seg_corr, dim):
+            max_unconstrained = torch.max(corr, dim=dim)[0]
+            max_constrained = torch.max(corr * seg_corr, dim=dim)[0]
+            mean_corr = torch.mean(corr, dim=dim)
+            return (max_constrained - mean_corr) / (max_unconstrained - mean_corr)
+        
+        loss = torch.min(consistency(corr, seg_corr, 2), consistency(corr, seg_corr, 1)).mean()
+
+        return 1 - loss

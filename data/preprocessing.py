@@ -98,6 +98,15 @@ def preprocess(anno_root, roi=None):
 
         videos.append(dict(id=vid_id, name=name))
 
+        # Find the last frame with annotations
+        max_frame_with_annotation = -1
+        for track in root.findall("./track"):
+            for box in track:
+                attr = box.attrib
+                if not bool(int(attr["outside"])):
+                    frame_num = int(attr["frame"])
+                    max_frame_with_annotation = max(max_frame_with_annotation, frame_num)
+
         bbox = None
         cap = cv2.VideoCapture(os.path.join(vid_root, name))
         frame_id = 0
@@ -105,6 +114,11 @@ def preprocess(anno_root, roi=None):
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            # Stop processing frames after the last annotated frame
+            if max_frame_with_annotation >= 0 and frame_id > max_frame_with_annotation:
+                break
+                
             if bbox is None:
                 bbox = crop(frame, roi)
                 if anno_dir == "00610090":
