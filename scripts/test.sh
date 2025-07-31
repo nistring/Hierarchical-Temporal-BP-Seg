@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Array of config files
-configs=("no_temp" "sepGRU")
+configs=("sepGRU_TC10EX") # "no_temp_butPC") # "sepGRU" "attnGRU" "convGRU")
 
 # Run tests in parallel on different GPUs
 for i in "${!configs[@]}"; do

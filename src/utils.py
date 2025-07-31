@@ -26,15 +26,6 @@ def post_processing(masks: torch.Tensor) -> torch.Tensor:
     """Post-process segmentation masks."""
     masks = torch.nn.Softmax(dim=1)(masks[0])
     masks[:, 1:] = masks[:, 1:] * (masks[:, 0:1] < 0.5)
-    
-    mask_classes = masks.argmax(dim=1)
-    masks[:, 2] = masks[:, 2] * torch.any(mask_classes == 1, dim=(1, 2), keepdim=True)
-    masks[:, 4] = masks[:, 4] * torch.any(mask_classes == 3, dim=(1, 2), keepdim=True)
-    masks[:, 6:] = masks[:, 6:] * torch.any(mask_classes == 4, dim=(1, 2), keepdim=True).unsqueeze(1)
-    
-    c56_dominant = ((mask_classes < 3) * (mask_classes > 0)).sum(dim=(1, 2), keepdim=True) > (mask_classes > 5).sum(dim=(1, 2), keepdim=True)
-    masks[:, 1:3] = masks[:, 1:3] * c56_dominant[:, None]
-    masks[:, 6:] = masks[:, 6:] * ~c56_dominant[:, None]
     masks[:, 0] = 1 - masks[:, 1:].sum(dim=1)
     
     return masks

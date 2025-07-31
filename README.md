@@ -3,7 +3,7 @@
 This project develops a video object segmentation system using a temporal segmentation model, specifically tailored for ultrasound images. The model integrates a segmentation architecture with temporal modeling capabilities to analyze sequences of images effectively. The goal is to apply this video object segmentation model to a **sequential ultrasound imaging technique (SUIT)** to recognize individual components of the **brachial plexus (BP)**, which is expected to aid in brachial plexus block procedures.
 
 ## Preview
-![Preview](https://github.com/user-attachments/assets/863e9dac-49f6-47c3-8309-57d3a7c038df)
+![Preview](https://www.youtube.com/watch?v=nb6DnPcaAVo)
 
 ## Installation
 

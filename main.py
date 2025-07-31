@@ -102,11 +102,12 @@ def main(config, best_model_path=None):
         image_size=tuple(model_cfg["image_size"]),
         truncated_bptt_steps=12 if test_mode else model_cfg["truncated_bptt_steps"],
         logdir=Path(best_model_path).parent.parent if best_model_path else None,
-        alpha=model_cfg["alpha"],
-        encoder_depth=model_cfg["encoder_depth"],
+        ce_weight=model_cfg["ce_weight"],
         temporal_depth=model_cfg["temporal_depth"],
         temporal_loss_weight=model_cfg.get("temporal_loss_weight", 0.3),
-        sparsity_weight=model_cfg.get("sparsity_weight", 0.0),
+        negative_weight=model_cfg.get("negative_weight", 100),
+        positive_weight=model_cfg.get("positive_weight", 10),
+        exclusion_weight=model_cfg.get("exclusion_weight", 0.05),
         ckpt_path=bool(config["trainer"].get("ckpt_path")),
     )
 
@@ -135,6 +136,7 @@ def main(config, best_model_path=None):
         accumulate_grad_batches=trainer_cfg["accumulate_grad_batches"],
         use_distributed_sampler=False,
         logger=False if test_mode else TensorBoardLogger(save_dir="./", version=config["config_file"].split("/")[-1].split(".")[0]),
+        gradient_clip_val=1.0,
     )
 
     if test_mode:

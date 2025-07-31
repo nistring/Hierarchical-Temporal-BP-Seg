@@ -31,7 +31,7 @@ def process_video(video_source, output_path, model, image_size):
         tensor_input = v2.ToDtype(torch.float32, scale=True)(v2.Resize(image_size)(frame))[None, None]
 
         with torch.no_grad():
-            output, hidden_state, _ = model(tensor_input, hidden_state)
+            output, hidden_state = model(tensor_input, hidden_state)
 
         output = post_processing(output)[0]
         frame = process_video_stream(frame, output)
@@ -53,6 +53,7 @@ def process_video(video_source, output_path, model, image_size):
 
 
 def main(config, input_folder, output_folder, checkpoint_path):
+    os.makedirs(output_folder, exist_ok=True)
     model_config = config["model"].copy()
     model_config["image_size"] = tuple(model_config["image_size"])
     if "model_kwargs" in model_config:

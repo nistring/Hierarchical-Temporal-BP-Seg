@@ -168,6 +168,7 @@ cython_debug/
 #.idea/
 
 # PyPI configuration file
+.vscode
 .pypirc
 lightning_logs
 *json
@@ -177,4 +178,4 @@ lightning_logs
 *.pt
 nohup.out
 *.yaml
-visualize*
+*visualized*

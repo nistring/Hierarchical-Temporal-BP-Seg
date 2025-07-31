@@ -89,20 +89,152 @@ class DepthwiseSeparableConv2d(nn.Module):
     def forward(self, x):
         return self.pointwise(self.depthwise(x))
 
-class TTConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, padding=0, bias=True, tt_rank=8, dilation=1):
-        super().__init__()
-        mid_channels = min(tt_rank, in_channels, out_channels)
-        self.tt_cores = nn.ModuleList([
-            nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False),
-            nn.Conv2d(mid_channels, mid_channels, kernel_size=kernel_size, padding=padding, bias=False, dilation=dilation),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=bias)
-        ])
+class BaseConvTTCell(BaseConvRNNCell):
+    """Base class for Convolutional Tensor-Train cells"""
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+                 activation=F.tanh, order=3, steps=3, ranks=8, dilation=1):
+        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        
+        self.order = order
+        self.steps = steps
+        self.ranks = ranks
+        self.lags = steps - order + 1
+        self.hidden_states = None
+        self.hidden_pointer = 0
+        
+        # Temporal processing cores (shared between LSTM and GRU)
+        Conv3d = lambda in_channels, out_channels: nn.Conv3d(
+            in_channels=in_channels, out_channels=out_channels, bias=bias,
+            kernel_size=kernel_size + (self.lags,), padding=self.padding + (0,))
+        
+        self.layers_ = nn.ModuleList([Conv3d(hidden_dim, ranks) for _ in range(order)])
+        
+    def _get_conv2d(self, in_channels, out_channels):
+        """Helper to create Conv2d with consistent parameters"""
+        return nn.Conv2d(in_channels, out_channels, kernel_size=self.kernel_size, 
+                        padding=self.padding, bias=self.bias, dilation=self.dilation)
     
-    def forward(self, x):
-        for core in self.tt_cores:
-            x = core(x)
-        return x
+    def _process_temporal_states(self):
+        """Common temporal processing logic"""
+        for l in range(self.order):
+            input_pointer = self.hidden_pointer if l == 0 else (input_pointer + 1) % self.steps
+            input_states = self.hidden_states[input_pointer:] + self.hidden_states[:input_pointer]
+            input_states = torch.stack(input_states[:self.lags], dim=-1)
+            input_states = torch.squeeze(self.layers_[l](input_states), dim=-1)
+            
+            if l == 0:
+                temp_states = input_states
+            else:
+                temp_states = input_states + self._get_spatial_output(l-1, temp_states)
+        return temp_states
+    
+    def _get_spatial_output(self, layer_idx, temp_states):
+        """Get spatial layer output - to be implemented by subclasses"""
+        raise NotImplementedError
+    
+    def _update_hidden_buffer(self, outputs):
+        """Update hidden states buffer"""
+        self.hidden_states[self.hidden_pointer] = outputs
+        self.hidden_pointer = (self.hidden_pointer + 1) % self.steps
+
+class ConvTTLSTMCell(BaseConvTTCell):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+                 activation=F.tanh, order=3, steps=3, ranks=8, dilation=1):
+        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation, order, steps, ranks)
+        
+        self.cell_states = None
+        
+        # Spatial processing layers for LSTM gates
+        self.layers = nn.ModuleList()
+        for l in range(order):
+            in_channels = ranks if l < order - 1 else ranks + input_dim
+            out_channels = ranks if l < order - 1 else 4 * hidden_dim
+            self.layers.append(self._get_conv2d(in_channels, out_channels))
+        
+        self.reset_parameters()
+    
+    def _get_spatial_output(self, layer_idx, temp_states):
+        return self.layers[layer_idx](temp_states)
+    
+    def init_hidden(self, batch_size, cuda=True, device='cuda'):
+        self.hidden_states = [torch.zeros(batch_size, self.hidden_dim, self.height, self.width) 
+                             for _ in range(self.steps)]
+        self.cell_states = torch.zeros(batch_size, self.hidden_dim, self.height, self.width)
+        self.hidden_pointer = 0
+        
+        if cuda:
+            self.hidden_states = [h.to(device) for h in self.hidden_states]
+            self.cell_states = self.cell_states.to(device)
+        
+        return (self.hidden_states[0], self.cell_states)
+    
+    def forward(self, input, prev_state):
+        if self.hidden_states is None:
+            self.init_hidden(input.size(0), input.is_cuda, input.device)
+        
+        temp_states = self._process_temporal_states()
+        
+        # LSTM gates computation
+        concat_conv = self.layers[-1](torch.cat([input, temp_states], dim=1))
+        cc_i, cc_f, cc_o, cc_g = torch.split(concat_conv, self.hidden_dim, dim=1)
+        
+        i, f, o = torch.sigmoid(cc_i), torch.sigmoid(cc_f), torch.sigmoid(cc_o)
+        g = self.activation(cc_g)
+        
+        self.cell_states = f * self.cell_states + i * g
+        outputs = o * self.activation(self.cell_states)
+        
+        self._update_hidden_buffer(outputs)
+        return outputs, (outputs, self.cell_states)
+
+class ConvTTGRUCell(BaseConvTTCell):
+    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+                 activation=F.tanh, order=3, steps=3, ranks=8, dilation=1):
+        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation, order, steps, ranks)
+        
+        # Spatial processing layers for GRU gates
+        self.layers_zr = nn.ModuleList()
+        self.layers_h = nn.ModuleList()
+        for l in range(order):
+            in_channels = ranks if l < order - 1 else ranks + input_dim
+            out_channels_zr = ranks if l < order - 1 else 2 * hidden_dim
+            out_channels_h = ranks if l < order - 1 else hidden_dim
+            self.layers_zr.append(self._get_conv2d(in_channels, out_channels_zr))
+            self.layers_h.append(self._get_conv2d(in_channels, out_channels_h))
+        
+        self.reset_parameters()
+    
+    def _get_spatial_output(self, layer_idx, temp_states):
+        return self.layers_zr[layer_idx](temp_states)
+    
+    def init_hidden(self, batch_size, cuda=True, device='cuda'):
+        self.hidden_states = [torch.zeros(batch_size, self.hidden_dim, self.height, self.width) 
+                             for _ in range(self.steps)]
+        self.hidden_pointer = 0
+        
+        if cuda:
+            self.hidden_states = [h.to(device) for h in self.hidden_states]
+        
+        return self.hidden_states[0]
+    
+    def forward(self, input, h_prev):
+        if self.hidden_states is None:
+            self.init_hidden(input.size(0), input.is_cuda, input.device)
+        
+        temp_states = self._process_temporal_states()
+        
+        # GRU gates computation
+        zr_conv = self.layers_zr[-1](torch.cat([input, temp_states], dim=1))
+        z, r = torch.split(torch.sigmoid(zr_conv), self.hidden_dim, dim=1)
+        
+        # Reset-modulated computation
+        temp_states_reset = temp_states * r
+        h_conv = self.layers_h[-1](torch.cat([input, temp_states_reset], dim=1))
+        h_new = self.activation(h_conv)
+        
+        outputs = (1 - z) * h_new + z * self.hidden_states[self.hidden_pointer]
+        self._update_hidden_buffer(outputs)
+        return outputs
 
 # ConvLSTM Cells
 class ConvLSTMCell(BaseConvRNNCell):
@@ -119,7 +251,6 @@ class ConvLSTMCell(BaseConvRNNCell):
         conv_classes = {
             'standard': nn.Conv2d,
             'depthwise': DepthwiseSeparableConv2d,
-            'tt': TTConv2d
         }
         
         conv_class = conv_classes.get(conv_type, nn.Conv2d)
@@ -167,7 +298,6 @@ class ConvGRUCell(BaseConvRNNCell):
         conv_classes = {
             'standard': nn.Conv2d,
             'depthwise': DepthwiseSeparableConv2d,
-            'tt': TTConv2d
         }
         conv_class = conv_classes.get(conv_type, nn.Conv2d)
         
@@ -192,8 +322,8 @@ class ConvGRUCell(BaseConvRNNCell):
 
 # Main RNN classes
 class ConvLSTM(BaseConvRNN):
-    def __init__(self, **kwargs):
-        super().__init__(cell_class=ConvLSTMCell, **kwargs)
+    def __init__(self, cell_class=ConvLSTMCell, **kwargs):
+        super().__init__(cell_class=cell_class, **kwargs)
 
     def forward(self, input, hidden_state):
         cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
@@ -216,8 +346,8 @@ class ConvLSTM(BaseConvRNN):
         return [self.cell_list[i].init_hidden(batch_size, cuda, device) for i in range(self.num_layers)]
 
 class ConvGRU(BaseConvRNN):
-    def __init__(self, **kwargs):
-        super().__init__(cell_class=ConvGRUCell, **kwargs)
+    def __init__(self, cell_class=ConvGRUCell, **kwargs):
+        super().__init__(cell_class=cell_class, **kwargs)
 
     def forward(self, input, hidden_state):
         cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
@@ -256,7 +386,6 @@ class AttentionRNN(nn.Module):
         self.channel_rnn = channel_rnn_class(
             input_size=kwargs['input_dim'], 
             hidden_size=kwargs['hidden_dim'], 
-            num_layers=kwargs["num_layers"], 
             bias=False, 
             batch_first=True
         )
@@ -279,14 +408,14 @@ class AttentionRNN(nn.Module):
 def SepConvLSTM(**kwargs):
     return ConvLSTM(conv_type='depthwise', **kwargs)
 
-def TTConvLSTM(**kwargs):
-    return ConvLSTM(conv_type='tt', **kwargs)
-
 def SepConvGRU(**kwargs):
     return ConvGRU(conv_type='depthwise', **kwargs)
 
+def TTConvLSTM(**kwargs):
+    return ConvLSTM(ConvTTLSTMCell, **kwargs)
+
 def TTConvGRU(**kwargs):
-    return ConvGRU(conv_type='tt', **kwargs)
+    return ConvGRU(ConvTTGRUCell, **kwargs)
 
 def AttentionLSTM(**kwargs):
     return AttentionRNN(rnn_type="LSTM", **kwargs)

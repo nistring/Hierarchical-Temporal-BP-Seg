@@ -20,7 +20,7 @@ sys.path.append("./")
 import src.rnns as rnns
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
-from src.losses import PerceptualConsistencyLoss, SparsityLoss
+from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
 
 class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size,
@@ -56,7 +56,8 @@ class TemporalSegmentationModel(nn.Module):
             kwargs = {
                 "input_size": (h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
                 "input_dim": out_channel, "hidden_dim": out_channel, "kernel_size": kernel_size,
-                "num_layers": num_layers, "dilation": dilation, "batch_first": True,
+                "num_layers": num_layers[i] if isinstance(num_layers, list) else num_layers,
+                "dilation": dilation, "batch_first": True,
             }
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
             self.temporal_models.append(temporal_class(**kwargs))
@@ -66,29 +67,29 @@ class TemporalSegmentationModel(nn.Module):
         x = x.reshape(batch_size * seq_len, c, h, w)
 
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
-        perceptual_features = features[:2]
-        
+        temporal_features = features[:2]
+
         if self.temporal_models:
             hidden_state = hidden_state or [None] * len(self.temporal_models)
             for i, temporal_model in enumerate(self.temporal_models):
                 feature, hidden_state[i] = temporal_model(features[2 + i], hidden_state[i])
-                perceptual_features.append(feature)
-            perceptual_features.extend(features[2 + len(self.temporal_models):])
+                temporal_features.append(feature)
+            temporal_features.extend(features[2 + len(self.temporal_models):])
         else:
-            perceptual_features = features
+            temporal_features = features
 
-        out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in perceptual_features]
+        out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
         out = self.head(self.decoder(out))
         out = out.reshape(batch_size, seq_len, *out.shape[1:])
 
-        return out, hidden_state, perceptual_features[-1]
+        return out, hidden_state
 
 
 class SegmentationTrainer(L.LightningModule):
     def __init__(self, model, train_dataset, val_dataset, test_dataset, batch_size, learning_rate,
                  num_workers, sequence_length, image_size, truncated_bptt_steps, logdir=None,
-                 alpha=0.5, encoder_depth=5, temporal_depth=1, temporal_loss_weight=1,
-                 sparsity_weight=0.05, ckpt_path=None, **kwargs):
+                 ce_weight=0.5, temporal_depth=1, temporal_loss_weight=1,
+                 negative_weight=100, positive_weight=10, exclusion_weight=0.05, ckpt_path=None, **kwargs):
         super().__init__()
         self.model = model
         self.train_dataset = train_dataset
@@ -101,10 +102,12 @@ class SegmentationTrainer(L.LightningModule):
         self.image_size = image_size
         self.truncated_bptt_steps = truncated_bptt_steps
         self.logdir = logdir
-        self.alpha = alpha
+        self.ce_weight = ce_weight
         self.temporal_depth = temporal_depth
         self.temporal_loss_weight = temporal_loss_weight
-        self.sparsity_weight = sparsity_weight
+        self.positive_weight = positive_weight
+        self.negative_weight = negative_weight
+        self.exclusion_weight = exclusion_weight
         self.ckpt_path = ckpt_path
 
         # Data augmentation
@@ -120,8 +123,9 @@ class SegmentationTrainer(L.LightningModule):
         # Loss functions
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
         self.loss_crossentropy = nn.CrossEntropyLoss()
-        self.loss_temporal = PerceptualConsistencyLoss()
-        self.loss_sparsity = SparsityLoss()
+        self.loss_temporal = TemporalConsistencyLoss() #PerceptualConsistencyLoss()
+        self.loss_sparsity = ContrastiveLoss()
+        self.loss_exclusion = ExclusionLoss()
 
     def show_batch(self, win_size=(80, 100), save=True):
         def _to_vis(imgs, masks):
@@ -153,8 +157,8 @@ class SegmentationTrainer(L.LightningModule):
             plt.axis("off")
             plt.savefig(filename, bbox_inches="tight", pad_inches=0) if save else plt.show()
 
-        _plot_images(_to_vis(imgs, masks), "original.png")
-        _plot_images(_to_vis(imgs_aug, masks_aug), "augmented.png")
+        _plot_images(_to_vis(imgs, masks), "figure/original.png")
+        _plot_images(_to_vis(imgs_aug, masks_aug), "figure/augmented.png")
 
     def on_after_batch_transfer(self, batch, batch_idx):
         images, targets = batch
@@ -193,21 +197,25 @@ class SegmentationTrainer(L.LightningModule):
         images, targets = batch
         
         # Get predictions and temporal feature
-        masks, self.hidden_state, feature = self.model(images, self.hidden_state)
+        masks, self.hidden_state = self.model(images, self.hidden_state)
 
         masks_flatten = masks.reshape(-1, *masks.shape[2:])
         targets = targets["masks"].reshape(-1, *targets["masks"].shape[2:]).long()
         
+        positive, negative = self.loss_sparsity(masks_flatten)
         losses = {
             'tversky': self.loss_tversky(masks_flatten, targets),
             'crossentropy': self.loss_crossentropy(masks_flatten, targets),
-            'temporal': self.loss_temporal(masks, feature),
-            'sparsity': self.loss_sparsity(masks_flatten)
+            'temporal': self.loss_temporal(masks),
+            'positive': positive,
+            'negative': negative,
+            'exclusion': self.loss_exclusion(masks_flatten)
         }
         
-        total_loss = (losses['tversky'] + self.alpha * losses['crossentropy'] + 
+        total_loss = (losses['tversky'] + self.ce_weight * losses['crossentropy'] + 
                      self.temporal_loss_weight * losses['temporal'] + 
-                     self.sparsity_weight * losses['sparsity'])
+                     self.positive_weight * positive + self.negative_weight * negative +
+                     self.exclusion_weight * losses['exclusion'])
 
         # Log all losses
         for name, loss in losses.items():
@@ -271,7 +279,7 @@ class SegmentationTrainer(L.LightningModule):
             masks.scatter_(1, masks_argmax, masks_sum)
             return smp.metrics.get_stats(masks, target_masks, mode="multilabel", threshold=0.5)
 
-        masks, self.hidden_state, _ = self.model(images, self.hidden_state)
+        masks, self.hidden_state = self.model(images, self.hidden_state)
         tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
 
         self.metrics['tp'][-1] += tp.sum(0)
