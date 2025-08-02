@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 # Load a model
 model = SAM("sam2.1_l.pt")
-model.to('cuda:1')
+model.to('cuda:0')
 for step in ["train"]:#"GE_train", "GE_val", "mindray_train", "mindray_val", "val"]:
     annotations_file = Path("coco_annotations") / f"{step}.json"
     coco = COCO(annotations_file)

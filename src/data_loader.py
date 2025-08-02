@@ -120,11 +120,11 @@ class DistributedVideoSampler(DistributedSampler):
         num_videos = len(self.dataset.video_id_to_img_ids)
         
         if drop_last:
-            self.videos_per_rank = num_videos // (batch_size * self.num_replicas) * batch_size
+            self.videos_per_rank = num_videos // self.num_replicas
         else:
             self.videos_per_rank = math.ceil(num_videos / (batch_size * self.num_replicas)) * batch_size
             
-        self.padding_size = num_videos - math.ceil(num_videos / (batch_size * self.num_replicas)) * batch_size * self.num_replicas
+        self.padding_size = self.num_replicas * self.videos_per_rank - num_videos
         self.total_size = self.videos_per_rank * self.num_replicas * self.dataset.truncated_bptt_steps
 
     def __iter__(self) -> Iterator[List[int]]:

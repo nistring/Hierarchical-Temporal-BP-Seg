@@ -127,7 +127,7 @@ def main(config, best_model_path=None):
     ]
 
     trainer = L.Trainer(
-        strategy=DDPStrategy(static_graph=False, gradient_as_bucket_view=True, find_unused_parameters=False),
+        strategy=DDPStrategy(static_graph=False, gradient_as_bucket_view=True, find_unused_parameters=True),
         max_epochs=trainer_cfg["max_epochs"],
         devices=trainer_cfg["gpus"],
         callbacks=callbacks,
@@ -164,8 +164,8 @@ if __name__ == "__main__":
         "mode": args.mode,
         "best_model_path": args.best_model_path
     })
-    
-    if args.gpu:
+
+    if isinstance(args.gpu, int):
         config["trainer"]["gpus"] = (args.gpu,)
     
     if args.test_data_path and args.test_annotations_path:

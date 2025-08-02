@@ -1,15 +1,20 @@
 #!/bin/bash
 
 # Array of config files
-configs=("sepGRU_TC10EX") # "no_temp_butPC") # "sepGRU" "attnGRU" "convGRU")
+configs=("sepGRU2")
 
-# Run tests in parallel on different GPUs
+# Run tests in parallel on different GPUs (max 4 GPUs at a time)
 for i in "${!configs[@]}"; do
     config="${configs[$i]}"
-    gpu=$i
+    gpu=$((i % 4))  # Cycle through GPUs 0-3
     
-    echo "Starting test for $config on GPU $gpu"
-    python3 main.py --config_file lightning_logs/$config/config.yaml \
+    # Wait if we've reached the GPU limit (every 4 jobs)
+    if (( i > 0 && i % 4 == 0 )); then
+        wait
+    fi
+    
+    # Set CUDA_VISIBLE_DEVICES to isolate GPU usage
+    CUDA_VISIBLE_DEVICES=$gpu python3 main.py --config_file lightning_logs/$config/config.yaml \
         --mode "test" \
         --best_model_path lightning_logs/$config/checkpoints/last.ckpt \
         --test_data_path ./data/SUIT/images/val \

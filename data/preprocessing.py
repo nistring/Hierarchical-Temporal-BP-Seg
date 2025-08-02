@@ -160,11 +160,7 @@ def preprocess(anno_root, roi=None):
 
 
 if __name__ == "__main__":
-    # preprocess("raw/anno/GE_train", roi=(500, 100, 1100, 800))
-    # preprocess("raw/anno/GE_val", roi=(500, 100, 1100, 800))
-    # preprocess("raw/anno/mindray_train")
-    # preprocess("raw/anno/mindray_val")
-    preprocess("raw/anno/val")
+    preprocess("raw/anno_edited/val")
 
     # # for i in range(51, 76):
     # #     crop_vid(f"CNUH_DC04_BPB1_00{str(i)}.mp4")

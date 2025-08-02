@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LinearLR
 
 sys.path.append("./")
-import src.rnns as rnns
+import src.temp_module as rnns
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
 from src.utils import post_processing
 from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
@@ -48,35 +48,36 @@ class TemporalSegmentationModel(nn.Module):
                 param.requires_grad = False
 
         # Initialize temporal models
-        self.temporal_models = nn.ModuleList()
+        self.temporal_modules = nn.ModuleList()
         h, w = image_size
-        base_depth = 2 if self.encoder.out_channels[1] == 0 else 1
         
-        for i, out_channel in enumerate(self.encoder.out_channels[base_depth:base_depth + temporal_depth]):
+        # Start from the bottom level (deepest features) instead of base_depth
+        start_idx = len(self.encoder.out_channels) - temporal_depth
+        for i, out_channel in enumerate(self.encoder.out_channels[start_idx:]):
+            depth_level = start_idx + i
             kwargs = {
-                "input_size": (h // (2 ** (i + base_depth)), w // (2 ** (i + base_depth))),
+                "input_size": (h // (2 ** depth_level), w // (2 ** depth_level)),
                 "input_dim": out_channel, "hidden_dim": out_channel, "kernel_size": kernel_size,
                 "num_layers": num_layers[i] if isinstance(num_layers, list) else num_layers,
                 "dilation": dilation, "batch_first": True,
             }
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
-            self.temporal_models.append(temporal_class(**kwargs))
+            self.temporal_modules.append(temporal_class(**kwargs))
 
     def forward(self, x, hidden_state=None):
         batch_size, seq_len, c, h, w = x.size()
         x = x.reshape(batch_size * seq_len, c, h, w)
 
         features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
-        temporal_features = features[:2]
+        temporal_features = features.copy()
 
-        if self.temporal_models:
-            hidden_state = hidden_state or [None] * len(self.temporal_models)
-            for i, temporal_model in enumerate(self.temporal_models):
-                feature, hidden_state[i] = temporal_model(features[2 + i], hidden_state[i])
-                temporal_features.append(feature)
-            temporal_features.extend(features[2 + len(self.temporal_models):])
-        else:
-            temporal_features = features
+        if self.temporal_modules:
+            hidden_state = hidden_state or [None] * len(self.temporal_modules)
+            start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
+            for i, temporal_model in enumerate(self.temporal_modules):
+                feature_idx = start_idx + i
+                feature, hidden_state[i] = temporal_model(features[feature_idx], hidden_state[i])
+                temporal_features[feature_idx] = feature
 
         out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
         out = self.head(self.decoder(out))
