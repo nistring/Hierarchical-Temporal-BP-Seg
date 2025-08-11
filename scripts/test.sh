@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Array of config files
-configs=("sepGRU2")
+configs=("sepGRU384_2")
 
 # Run tests in parallel on different GPUs (max 4 GPUs at a time)
 for i in "${!configs[@]}"; do
@@ -14,7 +14,7 @@ for i in "${!configs[@]}"; do
     fi
     
     # Set CUDA_VISIBLE_DEVICES to isolate GPU usage
-    CUDA_VISIBLE_DEVICES=$gpu python3 main.py --config_file lightning_logs/$config/config.yaml \
+    python3 main.py --config_file lightning_logs/$config/config.yaml \
         --mode "test" \
         --best_model_path lightning_logs/$config/checkpoints/last.ckpt \
         --test_data_path ./data/SUIT/images/val \

@@ -38,30 +38,35 @@ class SaveConfigCallback(Callback):
             f.write("Model Summary and FLOPs Information\n" + "=" * 50 + "\n\n")
             f.write(str(summarize(pl_module, max_depth=3)))
             f.write(f"\n\nFLOPs Information:\n" + "-" * 20 + "\n")
-            f.write(f"Input shape: (1, {cfg['sequence_length']}, 3, {cfg['image_size'][0]}, {cfg['image_size'][1]})\n")
+            f.write(f"Input shape: {x.shape})\n")
             f.write(f"Forward FLOPs: {fwd_flops:,}\nForward GFLOPs: {fwd_flops / 1e9:.2f}\n")
 
 
 def create_datasets(config):
     """Create train, validation, and test datasets."""
     data_cfg, model_cfg = config["data"], config["model"]
-    common_params = {
-        "sequence_length": model_cfg["sequence_length"],
-        "image_size": tuple(model_cfg["image_size"]),
-        "batch_size": data_cfg["batch_size"],
-    }
     
     train_dataset = UltrasoundTrainDataset(
-        Path(data_cfg["train_data_path"]), Path(data_cfg["train_annotations_path"]),
-        truncated_bptt_steps=model_cfg["truncated_bptt_steps"], **common_params
+        Path(data_cfg["train"]["data_path"]), Path(data_cfg["train"]["annotations_path"]),
+        sequence_length=data_cfg["train"]["sequence_length"],
+        image_size=tuple(model_cfg["image_size"]),
+        batch_size=data_cfg["train"]["batch_size"],
+        truncated_bptt_steps=data_cfg["train"]["truncated_bptt_steps"]
     )
     val_dataset = UltrasoundTrainDataset(
-        Path(data_cfg["val_data_path"]), Path(data_cfg["val_annotations_path"]),
-        truncated_bptt_steps=model_cfg["truncated_bptt_steps"], train=False, **common_params
+        Path(data_cfg["val"]["data_path"]), Path(data_cfg["val"]["annotations_path"]),
+        sequence_length=data_cfg["val"]["sequence_length"],
+        image_size=tuple(model_cfg["image_size"]),
+        batch_size=data_cfg["val"]["batch_size"],
+        truncated_bptt_steps=data_cfg["val"]["truncated_bptt_steps"],
+        train=False
     )
     test_dataset = UltrasoundTestDataset(
-        Path(data_cfg["test_data_path"]), Path(data_cfg["test_annotations_path"]),
-        sequence_length=model_cfg["sequence_length"], image_size=tuple(model_cfg["image_size"]), batch_size=1
+        Path(data_cfg.get("test", {}).get("data_path", data_cfg["val"]["data_path"])), 
+        Path(data_cfg.get("test", {}).get("annotations_path", data_cfg["val"]["annotations_path"])),
+        sequence_length=data_cfg["val"]["sequence_length"], 
+        image_size=tuple(model_cfg["image_size"]), 
+        batch_size=1
     )
     
     return train_dataset, val_dataset, test_dataset
@@ -85,6 +90,7 @@ def main(config, best_model_path=None):
         "num_layers": model_cfg.get("num_layers", 1),
         "kernel_size": tuple(model_cfg.get("kernel_size", [3, 3])),
         "dilation": model_cfg.get("dilation", 1),
+        "conv_type": model_cfg.get("conv_type", "standard"),
         **model_cfg.get("model_kwargs", {})
     }
     
@@ -95,12 +101,12 @@ def main(config, best_model_path=None):
     # Create trainer module
     lit_module = SegmentationTrainer(
         model, train_dataset, val_dataset, test_dataset,
-        batch_size=config["data"]["batch_size"],
+        batch_size=config["data"]["train"]["batch_size"],
         learning_rate=model_cfg["learning_rate"],
         num_workers=config["data"]["num_workers"],
-        sequence_length=model_cfg["sequence_length"],
+        sequence_length=config["data"]["train"]["sequence_length"],
         image_size=tuple(model_cfg["image_size"]),
-        truncated_bptt_steps=12 if test_mode else model_cfg["truncated_bptt_steps"],
+        truncated_bptt_steps=config["data"]["train"]["truncated_bptt_steps"],
         logdir=Path(best_model_path).parent.parent if best_model_path else None,
         ce_weight=model_cfg["ce_weight"],
         temporal_depth=model_cfg["temporal_depth"],
@@ -170,15 +176,12 @@ if __name__ == "__main__":
     
     if args.test_data_path and args.test_annotations_path:
         config["data"].update({
-            "test_data_path": args.test_data_path,
-            "test_annotations_path": args.test_annotations_path
+            "test": {
+                "data_path": args.test_data_path,
+                "annotations_path": args.test_annotations_path
+            }
         })
     elif args.test_data_path or args.test_annotations_path:
         raise ValueError("Both test_data_path and test_annotations_path must be provided.")
-    else:
-        config["data"].update({
-            "test_data_path": config["data"]["val_data_path"],
-            "test_annotations_path": config["data"]["val_annotations_path"]
-        })
         
     main(config, best_model_path=args.best_model_path)

@@ -114,18 +114,17 @@ class UltrasoundTestDataset(BaseUltrasoundDataset):
 
 class DistributedVideoSampler(DistributedSampler):
     def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None, 
-                 shuffle: bool = False, seed: int = 0, drop_last: bool = False, batch_size: int = 1) -> None:
+                 shuffle: bool = False, seed: int = 0, drop_last: bool = False) -> None:
         super().__init__(dataset, num_replicas, rank, shuffle, seed, drop_last)
-        self.batch_size = batch_size
         num_videos = len(self.dataset.video_id_to_img_ids)
         
         if drop_last:
-            self.videos_per_rank = num_videos // self.num_replicas
+            self.videos_per_rank = num_videos // (self.num_replicas * self.dataset.batch_size) * self.dataset.batch_size
         else:
-            self.videos_per_rank = math.ceil(num_videos / (batch_size * self.num_replicas)) * batch_size
+            self.videos_per_rank = math.ceil(num_videos / (self.num_replicas * self.dataset.batch_size)) * self.dataset.batch_size
             
         self.padding_size = self.num_replicas * self.videos_per_rank - num_videos
-        self.total_size = self.videos_per_rank * self.num_replicas * self.dataset.truncated_bptt_steps
+        self.num_samples = self.videos_per_rank * self.dataset.truncated_bptt_steps
 
     def __iter__(self) -> Iterator[List[int]]:
         indices = torch.arange(len(self.dataset)).reshape(-1, self.dataset.truncated_bptt_steps)
@@ -136,12 +135,8 @@ class DistributedVideoSampler(DistributedSampler):
             indices = indices[torch.randperm(len(indices), generator=g).tolist()]
             
         if not self.drop_last:
-            if self.padding_size <= len(indices):
-                indices = torch.cat((indices, indices[:self.padding_size])) 
-            else:
-                repeats = math.ceil(self.padding_size / len(indices))
-                indices = torch.cat((indices, indices.repeat(repeats)[:self.padding_size]))
+            indices = torch.cat((indices, indices[:self.padding_size])) 
 
         indices = indices[self.videos_per_rank * self.rank: self.videos_per_rank * (self.rank + 1)]
-        indices = indices.reshape(-1, self.batch_size, self.dataset.truncated_bptt_steps).transpose(1, 2).reshape(-1)
+        indices = indices.reshape(-1, self.dataset.batch_size, self.dataset.truncated_bptt_steps).transpose(1, 2).reshape(-1)
         return iter(indices)

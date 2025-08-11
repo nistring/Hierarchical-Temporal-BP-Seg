@@ -25,7 +25,7 @@ from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
 class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size,
                  temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1,
-                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, **model_kwargs):
+                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard", **model_kwargs):
         super().__init__()
         assert encoder_depth > temporal_depth, "Encoder depth should be greater than temporal depth."
         
@@ -53,13 +53,16 @@ class TemporalSegmentationModel(nn.Module):
         
         # Start from the bottom level (deepest features) instead of base_depth
         start_idx = len(self.encoder.out_channels) - temporal_depth
-        for i, out_channel in enumerate(self.encoder.out_channels[start_idx:]):
+        out_channels = self.encoder.out_channels[start_idx:]
+        for i in range(len(out_channels)):
             depth_level = start_idx + i
             kwargs = {
                 "input_size": (h // (2 ** depth_level), w // (2 ** depth_level)),
-                "input_dim": out_channel, "hidden_dim": out_channel, "kernel_size": kernel_size,
+                "input_dim": out_channels[i] + out_channels[i + 1] if i + 1 < len(out_channels) else out_channels[i],
+                "hidden_dim": out_channels[i], "kernel_size": kernel_size,
                 "num_layers": num_layers[i] if isinstance(num_layers, list) else num_layers,
                 "dilation": dilation, "batch_first": True,
+                "conv_type": conv_type,
             }
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
             self.temporal_modules.append(temporal_class(**kwargs))
@@ -74,9 +77,23 @@ class TemporalSegmentationModel(nn.Module):
         if self.temporal_modules:
             hidden_state = hidden_state or [None] * len(self.temporal_modules)
             start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
-            for i, temporal_model in enumerate(self.temporal_modules):
+            
+            # Process from deepest to shallowest
+            for i in range(len(self.temporal_modules) - 1, -1, -1):
                 feature_idx = start_idx + i
-                feature, hidden_state[i] = temporal_model(features[feature_idx], hidden_state[i])
+                current_features = features[feature_idx]
+
+                # If not the deepest layer, fuse with upsampled features from the layer below
+                if i < len(self.temporal_modules) - 1:
+                    prev_temp_features = temporal_features[feature_idx + 1]
+                    upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
+                                                       size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+                    upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
+                    
+                    # Concatenate along the channel dimension
+                    current_features = torch.cat([current_features, upsampled_features], dim=2)
+
+                feature, hidden_state[i] = self.temporal_modules[i](current_features, hidden_state[i])
                 temporal_features[feature_idx] = feature
 
         out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
@@ -168,16 +185,15 @@ class SegmentationTrainer(L.LightningModule):
             targets["masks"] = torch.Tensor(targets["masks"])
         return images, targets
 
-    def _create_dataloader(self, dataset):
-        return DataLoader(dataset, batch_size=self.batch_size, shuffle=False, 
-                         num_workers=self.num_workers, pin_memory=True,
-                         sampler=DistributedVideoSampler(dataset, batch_size=self.batch_size))
-
     def train_dataloader(self):
-        return self._create_dataloader(self.train_dataset)
+        return DataLoader(self.train_dataset, batch_size=self.train_dataset.batch_size,
+                         num_workers=self.num_workers, pin_memory=True,
+                         sampler=DistributedVideoSampler(self.train_dataset, shuffle=True))
 
     def val_dataloader(self):
-        return self._create_dataloader(self.val_dataset)
+        return DataLoader(self.val_dataset, batch_size=self.val_dataset.batch_size,
+                         num_workers=self.num_workers, pin_memory=True,
+                         sampler=DistributedVideoSampler(self.val_dataset, shuffle=False))
 
     def test_dataloader(self):
         return DataLoader(self.test_dataset, batch_size=1, num_workers=self.num_workers, pin_memory=True)
@@ -254,7 +270,6 @@ class SegmentationTrainer(L.LightningModule):
         return self.compute_loss(batch, batch_idx, "val")
 
     def on_test_start(self):
-        n = self.truncated_bptt_steps
         self.metrics = {metric: [] for metric in ['tp', 'fp', 'fn', 'tn', "video_id"]}
 
         self.video_id = None
@@ -330,17 +345,17 @@ if __name__ == "__main__":
     from pathlib import Path
 
     # Sample configuration
-    with open("configs/config19.yaml", "r") as f:
+    with open("configs/sepGRU_batch4.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     # Initialize datasets
     train_dataset = UltrasoundTrainDataset(
-        Path(config["data"]["train_data_path"]),
-        Path(config["data"]["train_annotations_path"]),
-        sequence_length=config["model"]["sequence_length"],
+        Path(config["data"]["train"]["data_path"]),
+        Path(config["data"]["train"]["annotations_path"]),
+        sequence_length=config["data"]["train"]["sequence_length"],
         image_size=tuple(config["model"]["image_size"]),
-        batch_size=config["data"]["batch_size"],
-        truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
+        batch_size=config["data"]["train"]["batch_size"],
+        truncated_bptt_steps=config["data"]["train"]["truncated_bptt_steps"],
     )
 
     # Initialize the model
@@ -361,18 +376,19 @@ if __name__ == "__main__":
         train_dataset=train_dataset,
         val_dataset=None,
         test_dataset=None,
-        batch_size=config["data"]["batch_size"],
+        batch_size=config["data"]["train"]["batch_size"],
         learning_rate=config["model"]["learning_rate"],
         num_workers=config["data"]["num_workers"],
-        sequence_length=config["model"]["sequence_length"],
+        sequence_length=config["data"]["train"]["sequence_length"],
         image_size=tuple(config["model"]["image_size"]),
-        truncated_bptt_steps=config["model"]["truncated_bptt_steps"],
+        truncated_bptt_steps=config["data"]["train"]["truncated_bptt_steps"],
         logdir=None,
-        alpha=config["model"]["alpha"],
-        encoder_depth=config["model"]["encoder_depth"],
+        ce_weight=config["model"]["ce_weight"],
         temporal_depth=config["model"]["temporal_depth"],
         temporal_loss_weight=config["model"].get("temporal_loss_weight", 0.3),
-        sparsity_weight=config["model"].get("sparsity_weight", 0.05),
+        negative_weight=config["model"].get("negative_weight", 100),
+        positive_weight=config["model"].get("positive_weight", 10),
+        exclusion_weight=config["model"].get("exclusion_weight", 0.05),
     )
 
     # Show batch
