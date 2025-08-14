@@ -23,17 +23,17 @@ from src.utils import post_processing
 from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
 
 class TemporalSegmentationModel(nn.Module):
-    def __init__(self, encoder_name, segmentation_model_name, num_classes, image_size,
+    def __init__(self, encoder_name, segmentation_model_name, num_classes,
                  temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1,
-                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard", **model_kwargs):
-        super().__init__()
-        assert encoder_depth > temporal_depth, "Encoder depth should be greater than temporal depth."
-        
+                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard", 
+                 encoder_weights="imagenet", temporal_upsampling="bilinear", **model_kwargs):
+        super().__init__()        
         self.num_classes = num_classes
+        self.temporal_upsampling = temporal_upsampling
         
         # Initialize segmentation model
         model_args = {
-            "encoder_name": encoder_name, "encoder_weights": "imagenet",
+            "encoder_name": encoder_name, "encoder_weights": encoder_weights,
             "classes": num_classes + 1, "in_channels": 1, "encoder_depth": encoder_depth
         }
         model_args.update(model_kwargs)
@@ -47,17 +47,11 @@ class TemporalSegmentationModel(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-        # Initialize temporal models
         self.temporal_modules = nn.ModuleList()
-        h, w = image_size
-        
         # Start from the bottom level (deepest features) instead of base_depth
-        start_idx = len(self.encoder.out_channels) - temporal_depth
-        out_channels = self.encoder.out_channels[start_idx:]
+        out_channels = self.encoder.out_channels[-temporal_depth:]
         for i in range(len(out_channels)):
-            depth_level = start_idx + i
             kwargs = {
-                "input_size": (h // (2 ** depth_level), w // (2 ** depth_level)),
                 "input_dim": out_channels[i] + out_channels[i + 1] if i + 1 < len(out_channels) else out_channels[i],
                 "hidden_dim": out_channels[i], "kernel_size": kernel_size,
                 "num_layers": num_layers[i] if isinstance(num_layers, list) else num_layers,
@@ -86,6 +80,7 @@ class TemporalSegmentationModel(nn.Module):
                 # If not the deepest layer, fuse with upsampled features from the layer below
                 if i < len(self.temporal_modules) - 1:
                     prev_temp_features = temporal_features[feature_idx + 1]
+                    
                     upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
                                                        size=current_features.shape[-2:], mode='bilinear', align_corners=False)
                     upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
@@ -364,7 +359,6 @@ if __name__ == "__main__":
         segmentation_model_name=config["model"]["segmentation_model_name"],
         num_classes=config["model"]["num_classes"],
         temporal_model=config["model"]["temporal_model"],
-        image_size=tuple(config["model"]["image_size"]),
         encoder_depth=config["model"]["encoder_depth"],
         temporal_depth=config["model"]["temporal_depth"],
         freeze_encoder=config["model"].get("freeze_encoder", False),

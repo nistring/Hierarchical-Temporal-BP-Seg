@@ -83,7 +83,6 @@ def main(config, best_model_path=None):
         "segmentation_model_name": model_cfg["segmentation_model_name"],
         "num_classes": model_cfg["num_classes"],
         "temporal_model": model_cfg["temporal_model"],
-        "image_size": tuple(model_cfg["image_size"]),
         "encoder_depth": model_cfg["encoder_depth"],
         "temporal_depth": model_cfg["temporal_depth"],
         "freeze_encoder": model_cfg.get("freeze_encoder", False),
@@ -91,6 +90,7 @@ def main(config, best_model_path=None):
         "kernel_size": tuple(model_cfg.get("kernel_size", [3, 3])),
         "dilation": model_cfg.get("dilation", 1),
         "conv_type": model_cfg.get("conv_type", "standard"),
+        "encoder_weights": model_cfg.get("encoder_weights", "imagenet"),
         **model_cfg.get("model_kwargs", {})
     }
     
@@ -132,8 +132,21 @@ def main(config, best_model_path=None):
         )
     ]
 
+    find_unused_parameters = False
+    if "deeplab" in config["model"]["segmentation_model_name"].lower():
+        find_unused_parameters = True
+    
+    version_name = config["config_file"].split("/")[-1].split(".")[0]
+    if not test_mode:
+        log_dir = Path("./lightning_logs")
+        if (log_dir / version_name).exists():
+            i = 1
+            while (log_dir / f"{version_name}_{i}").exists():
+                i += 1
+            version_name = f"{version_name}_{i}"
+
     trainer = L.Trainer(
-        strategy=DDPStrategy(static_graph=False, gradient_as_bucket_view=True, find_unused_parameters=True),
+        strategy=DDPStrategy(static_graph=False, gradient_as_bucket_view=True, find_unused_parameters=find_unused_parameters),
         max_epochs=trainer_cfg["max_epochs"],
         devices=trainer_cfg["gpus"],
         callbacks=callbacks,
@@ -141,7 +154,7 @@ def main(config, best_model_path=None):
         sync_batchnorm=True,
         accumulate_grad_batches=trainer_cfg["accumulate_grad_batches"],
         use_distributed_sampler=False,
-        logger=False if test_mode else TensorBoardLogger(save_dir="./", version=config["config_file"].split("/")[-1].split(".")[0]),
+        logger=False if test_mode else TensorBoardLogger(save_dir="./", version=version_name),
         gradient_clip_val=1.0,
     )
 

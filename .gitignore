@@ -179,3 +179,4 @@ lightning_logs
 nohup.out
 *.yaml
 *visualized*
+menuscript

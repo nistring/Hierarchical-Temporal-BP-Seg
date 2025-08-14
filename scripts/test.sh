@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Array of config files
-configs=("sepGRU384_2")
+configs=("deeplab4")
 
 # Run tests in parallel on different GPUs (max 4 GPUs at a time)
 for i in "${!configs[@]}"; do

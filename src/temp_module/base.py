@@ -4,9 +4,8 @@ import torch.nn.functional as F
 from .layers import DepthwiseSeparableConv2d, PointwiseConv2d
 
 class BaseConvRNNCell(nn.Module):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, activation=F.tanh, dilation=1):
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, activation=F.tanh, dilation=1):
         super().__init__()
-        self.height, self.width = input_size
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.kernel_size = kernel_size
@@ -31,9 +30,10 @@ class BaseConvRNNCell(nn.Module):
         }
         return conv_class(in_channels, out_channels, **conv_kwargs)
 
-    def init_hidden(self, batch_size, cuda=True, device='cuda'):
-        state = torch.zeros(batch_size, self.hidden_dim, self.height, self.width)
-        return state.to(device) if cuda else state
+    def init_hidden(self, input_tensor):
+        batch_size, _, height, width = input_tensor.size()
+        state = torch.zeros(batch_size, self.hidden_dim, height, width, device=input_tensor.device)
+        return state
 
     def reset_parameters(self):
         for module in self.modules():
@@ -43,7 +43,7 @@ class BaseConvRNNCell(nn.Module):
                     module.bias.data.zero_()
 
 class BaseConvRNN(nn.Module):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, num_layers,
+    def __init__(self, input_dim, hidden_dim, kernel_size, num_layers,
                  batch_first=True, bias=True, activation=F.tanh, dilation=1, conv_type='standard', cell_class=None, **cell_kwargs):
         super().__init__()
         self._check_kernel_size_consistency(kernel_size)
@@ -54,7 +54,6 @@ class BaseConvRNN(nn.Module):
         activation = self._extend_for_multilayer(activation, num_layers)
         dilation = self._extend_for_multilayer(dilation, num_layers)
 
-        self.height, self.width = input_size
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -65,7 +64,6 @@ class BaseConvRNN(nn.Module):
         for i in range(num_layers):
             cur_input_dim = input_dim if i == 0 else hidden_dim[i-1]
             cell_list.append(cell_class(
-                input_size=(self.height, self.width),
                 input_dim=cur_input_dim,
                 hidden_dim=hidden_dim[i],
                 kernel_size=kernel_size[i],
@@ -99,8 +97,7 @@ class BaseConvRNN(nn.Module):
         cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
         
         if hidden_state is None:
-            batch_dim = 0 if self.batch_first else 1
-            hidden_state = self.get_init_states(cur_layer_input[0].size(batch_dim))
+            hidden_state = self.get_init_states(cur_layer_input[0])
 
         for layer_idx in range(self.num_layers):
             output_inner = []
@@ -114,8 +111,8 @@ class BaseConvRNN(nn.Module):
 
         return torch.stack(output_inner, dim=int(self.batch_first)), hidden_state
 
-    def get_init_states(self, batch_size, cuda=True, device='cuda'):
-        return [self.cell_list[i].init_hidden(batch_size, cuda, device) for i in range(self.num_layers)]
+    def get_init_states(self, input_tensor):
+        return [self.cell_list[i].init_hidden(input_tensor) for i in range(self.num_layers)]
 
 class BaseConvLSTM(BaseConvRNN):
     def __init__(self, **kwargs):
@@ -125,8 +122,7 @@ class BaseConvLSTM(BaseConvRNN):
         cur_layer_input = torch.unbind(input, dim=int(self.batch_first))
         
         if hidden_state is None:
-            batch_dim = 0 if self.batch_first else 1
-            hidden_state = self.get_init_states(cur_layer_input[0].size(batch_dim))
+            hidden_state = self.get_init_states(cur_layer_input[0])
 
         for layer_idx in range(self.num_layers):
             output_inner = []

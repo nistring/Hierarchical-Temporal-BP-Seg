@@ -3,9 +3,9 @@ import torch.nn.functional as F
 from .base import BaseConvRNNCell
 
 class ConvLSTMCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv = self._get_conv_layer(input_dim + hidden_dim, 4 * hidden_dim, conv_type, bias)
         self.reset_parameters()
@@ -21,16 +21,17 @@ class ConvLSTMCell(BaseConvRNNCell):
         h_cur = o * self.activation(c_cur)
         return h_cur, c_cur
 
-    def init_hidden(self, batch_size, cuda=True, device='cuda'):
-        state = (torch.zeros(batch_size, self.hidden_dim, self.height, self.width),
-                 torch.zeros(batch_size, self.hidden_dim, self.height, self.width))
-        return (state[0].to(device), state[1].to(device)) if cuda else state
+    def init_hidden(self, input_tensor):
+        batch_size, _, height, width = input_tensor.size()
+        state = (torch.zeros(batch_size, self.hidden_dim, height, width, device=input_tensor.device),
+                 torch.zeros(batch_size, self.hidden_dim, height, width, device=input_tensor.device))
+        return state
 
 class ReducedConvLSTMCell(BaseConvRNNCell):
     # https://arxiv.org/pdf/1810.07251v5
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv_f = self._get_conv_layer(input_dim + hidden_dim * 2, hidden_dim, conv_type, bias)
         self.conv_g = self._get_conv_layer(input_dim + hidden_dim, hidden_dim, conv_type, bias)
@@ -44,15 +45,16 @@ class ReducedConvLSTMCell(BaseConvRNNCell):
         h = self.activation(c) * f
         return h, c
 
-    def init_hidden(self, batch_size, cuda=True, device='cuda'):
-        state = (torch.zeros(batch_size, self.hidden_dim, self.height, self.width),
-                 torch.zeros(batch_size, self.hidden_dim, self.height, self.width))
-        return (state[0].to(device), state[1].to(device)) if cuda else state
+    def init_hidden(self, input_tensor):
+        batch_size, _, height, width = input_tensor.size()
+        state = (torch.zeros(batch_size, self.hidden_dim, height, width, device=input_tensor.device),
+                 torch.zeros(batch_size, self.hidden_dim, height, width, device=input_tensor.device))
+        return state
 
 class ConvGRUCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv_zr = self._get_conv_layer(input_dim + hidden_dim, 2 * hidden_dim, conv_type, bias)
         self.conv_h1 = self._get_conv_layer(input_dim, hidden_dim, conv_type, bias)
@@ -66,9 +68,9 @@ class ConvGRUCell(BaseConvRNNCell):
         return (1 - z) * h_ + z * h_prev
 
 class ConvRNNCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv = self._get_conv_layer(input_dim + hidden_dim, hidden_dim, conv_type, bias)
         self.reset_parameters()
@@ -79,9 +81,9 @@ class ConvRNNCell(BaseConvRNNCell):
         return h_cur
 
 class MinConvLSTMCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv = self._get_conv_layer(input_dim, 3 * hidden_dim, conv_type, bias)
         self.reset_parameters()
@@ -94,9 +96,9 @@ class MinConvLSTMCell(BaseConvRNNCell):
         return f_prime * h_prev + i_prime * h_
 
 class MinConvGRUCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv_zh = self._get_conv_layer(input_dim, 2 * hidden_dim, conv_type, bias)
         self.reset_parameters()
@@ -108,9 +110,9 @@ class MinConvGRUCell(BaseConvRNNCell):
     
 # https://arxiv.org/pdf/2508.03614v1
 class MinConvExpLSTMCell(BaseConvRNNCell):
-    def __init__(self, input_size, input_dim, hidden_dim, kernel_size, bias=True, 
+    def __init__(self, input_dim, hidden_dim, kernel_size, bias=True, 
                  activation=F.tanh, conv_type='standard', dilation=1, **kwargs):
-        super().__init__(input_size, input_dim, hidden_dim, kernel_size, bias, activation, dilation)
+        super().__init__(input_dim, hidden_dim, kernel_size, bias, activation, dilation)
         
         self.conv = self._get_conv_layer(input_dim, 3 * hidden_dim, conv_type, bias)
         self.reset_parameters()
