@@ -177,6 +177,8 @@ lightning_logs
 *xml
 *.pt
 nohup.out
-*.yaml
 *visualized*
 menuscript
+aggregate*
+exps
+scripts

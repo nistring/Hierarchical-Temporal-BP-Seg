@@ -1,9 +1,13 @@
 from .base import BaseConvRNN, BaseConvLSTM
-from .cell import ConvLSTMCell, ConvGRUCell, ConvRNNCell, MinConvLSTMCell, MinConvGRUCell, MinConvExpLSTMCell, ReducedConvLSTMCell
+from .cell import ConvLSTMCell, ConvGRUCell, ConvRNNCell, MinConvLSTMCell, MinConvGRUCell, MinConvExpLSTMCell, ReducedConvLSTMCell, PeepholeConvLSTMCell
 
 class ConvLSTM(BaseConvLSTM):
     def __init__(self, **kwargs):
         super().__init__(cell_class=ConvLSTMCell, **kwargs)
+
+class PeepholeConvLSTM(BaseConvLSTM):
+    def __init__(self, **kwargs):
+        super().__init__(cell_class=PeepholeConvLSTMCell, **kwargs)
 
 class ReducedConvLSTM(BaseConvLSTM):
     def __init__(self, **kwargs):

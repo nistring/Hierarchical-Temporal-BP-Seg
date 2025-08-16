@@ -1,0 +1,50 @@
+# config.yaml
+trainer:
+  max_epochs: 20
+  gpus: [0,1,2,3]
+  accumulate_grad_batches: 1
+  ckpt_path: null
+
+model:
+  # Model name
+  encoder_name: 'mit_b0'
+  segmentation_model_name: 'Segformer'
+  temporal_model: 'ConvLSTM'
+  conv_type: "depthwise"
+  # Model parameters
+  num_classes: 8
+  freeze_encoder: false
+  num_layers: 1  # Number of layers in the temporal model
+  kernel_size: [3, 3]  # Kernel size for temporal model
+  dilation: 1  # Dilation for temporal model
+  encoder_depth: 5
+  temporal_depth: 4
+  model_kwargs:
+    decoder_segmentation_channels: 256
+  # Training parameters
+  learning_rate: 1.0e-3
+  image_size: [448, 448]
+  # Loss weights
+  ce_weight: 0.5
+  temporal_loss_weight: 5
+  exclusion_weight: 5
+  positive_weight: 5
+  negative_weight: 5
+data:
+  train:
+    data_path: './data/SUIT/images/train'
+    annotations_path: './data/SUIT/coco_annotations/train_updated.json'
+    sequence_length: 100 # truncated_bptt_steps x sequence_length = 500
+    batch_size: 1 # Batch size x sequence_length = 100 
+    truncated_bptt_steps: 5 # Should be equal to gradient accumulation steps
+  val:
+    data_path: './data/SUIT/images/val'
+    annotations_path: './data/SUIT/coco_annotations/val_updated.json'
+    sequence_length: 100
+    batch_size: 1
+    truncated_bptt_steps: 5
+  num_workers: 12 # Number of workers x number of GPUs = 48
+
+logging:
+  monitor: 'val_loss'
+  mode: 'min'

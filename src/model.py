@@ -49,7 +49,7 @@ class TemporalSegmentationModel(nn.Module):
 
         self.temporal_modules = nn.ModuleList()
         # Start from the bottom level (deepest features) instead of base_depth
-        out_channels = self.encoder.out_channels[-temporal_depth:]
+        out_channels = self.encoder.out_channels[len(self.encoder.out_channels)-temporal_depth:]
         for i in range(len(out_channels)):
             kwargs = {
                 "input_dim": out_channels[i] + out_channels[i + 1] if i + 1 < len(out_channels) else out_channels[i],
