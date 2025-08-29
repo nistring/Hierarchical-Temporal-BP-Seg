@@ -9,16 +9,14 @@ import argparse
 
 # Define colors for different nerve labels
 LABEL_COLORS = {
-    'C5': (255, 0, 0),      # Red
-    'C6': (0, 255, 0),      # Green
-    'C7': (0, 0, 255),      # Blue
-    'C8': (255, 255, 0),    # Cyan
-    'UT': (255, 0, 255),    # Magenta
-    'MT': (0, 255, 255),    # Yellow
-    'LT': (128, 0, 128),    # Purple
-    'SSN': (255, 165, 0),   # Orange
-    'AD': (0, 128, 0),      # Dark Green
-    'PD': (0, 0, 128),      # Dark Blue
+    'C5': (192, 255, 0),
+    'C6': (0, 255, 192),
+    'C7/MT': (64, 0, 255),
+    'C8/LT': (255, 0, 64),
+    'UT': (96, 255, 96),
+    'SSN': (0, 255, 0),
+    'AD': (255, 128, 0),
+    'PD': (255, 0, 255)
 }
 
 def find_video_file(annotation_path, video_dir="/home/nistring/object-detection-project/data/raw/videos"):
@@ -74,6 +72,10 @@ def parse_annotation_file(annotation_path):
         
         for track in tracks:
             label = track.get('label', 'Unknown')
+            if label in ['C7', 'MT']:
+                label = 'C7/MT'
+            elif label in ['C8', 'LT']:
+                label = 'C8/LT'
             track_id = track.get('id', '0')
             
             boxes = track.findall('.//box')
@@ -94,6 +96,9 @@ def parse_annotation_file(annotation_path):
                     'track_id': track_id,
                     'bbox': (xtl, ytl, xbr, ybr)
                 })
+        
+        if frames_data:
+            video_length = max(frames_data.keys()) + 1
         
         return frames_data, video_length, (original_width, original_height)
     
@@ -158,7 +163,7 @@ def create_visualization_video(annotation_path, output_dir, video_dir="/home/nis
     
     while True:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame_count >= video_length:
             break
         
         # Draw bounding boxes if they exist for this frame
@@ -292,6 +297,10 @@ def analyze_annotation_file_detailed(file_path):
         
         for track in tracks:
             label = track.get('label', 'Unknown')
+            if label in ['C7', 'MT']:
+                label = 'C7/MT'
+            elif label in ['C8', 'LT']:
+                label = 'C8/LT'
             track_id = track.get('id', '0')
             
             boxes = track.findall('.//box')
@@ -315,6 +324,9 @@ def analyze_annotation_file_detailed(file_path):
         
         # Calculate detailed statistics
         frames_with_boxes = len(frames_data)
+        if frames_data:
+            video_length = max(frames_data.keys()) + 1
+        
         coverage_ratio = frames_with_boxes / video_length if video_length > 0 else 0
         total_boxes = sum(len(boxes) for boxes in frames_data.values())
         density = total_boxes / video_length if video_length > 0 else 0
@@ -390,11 +402,37 @@ def create_summary_and_csv(all_stats, output_dir, username, skip_video_processin
     
     # CSV
     csv_path = os.path.join(output_dir, "annotation_statistics.csv")
+    
+    # Get all labels and sort them for consistent column order
+    all_labels = sorted(LABEL_COLORS.keys())
+    
     with open(csv_path, 'w') as f:
-        f.write("file_name,video_length,total_boxes,density,coverage_ratio,username\n")
+        # Write header
+        header = "file_name,video_length,frames_with_boxes,coverage_ratio,total_boxes,density,username"
+        for label in all_labels:
+            header += f",{label}_boxes,{label}_coverage"
+        f.write(header + "\n")
+        
+        # Write data rows
         for stats in all_stats:
-            f.write(f"{stats['file_name']},{stats['video_length']},{stats['total_boxes']},")
-            f.write(f"{stats['density']:.4f},{stats['coverage_ratio']:.4f},{stats.get('username', 'Unknown')}\n")
+            row = [
+                stats['file_name'],
+                stats['video_length'],
+                stats['frames_with_boxes'],
+                f"{stats['coverage_ratio']:.4f}",
+                stats['total_boxes'],
+                f"{stats['density']:.4f}",
+                stats.get('username', 'Unknown')
+            ]
+            
+            label_stats = stats.get('label_stats', {})
+            label_coverage = stats.get('label_coverage_ratios', {})
+            
+            for label in all_labels:
+                row.append(label_stats.get(label, 0))
+                row.append(f"{label_coverage.get(label, 0.0):.4f}")
+            
+            f.write(",".join(map(str, row)) + "\n")
     
     print(f"Summary saved: {summary_path}")
     print(f"CSV saved: {csv_path}")

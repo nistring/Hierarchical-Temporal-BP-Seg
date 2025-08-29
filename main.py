@@ -64,7 +64,7 @@ def create_datasets(config):
     test_dataset = UltrasoundTestDataset(
         Path(data_cfg.get("test", {}).get("data_path", data_cfg["val"]["data_path"])), 
         Path(data_cfg.get("test", {}).get("annotations_path", data_cfg["val"]["annotations_path"])),
-        sequence_length=data_cfg["val"]["sequence_length"], 
+        sequence_length=100, 
         image_size=tuple(model_cfg["image_size"]), 
         batch_size=1
     )
@@ -91,6 +91,7 @@ def main(config, best_model_path=None):
         "dilation": model_cfg.get("dilation", 1),
         "conv_type": model_cfg.get("conv_type", "standard"),
         "encoder_weights": model_cfg.get("encoder_weights", "imagenet"),
+    "use_hierarchical_fusion": model_cfg.get("use_hierarchical_fusion", True),
         **model_cfg.get("model_kwargs", {})
     }
     
@@ -113,7 +114,8 @@ def main(config, best_model_path=None):
         temporal_loss_weight=model_cfg.get("temporal_loss_weight", 0.3),
         negative_weight=model_cfg.get("negative_weight", 100),
         positive_weight=model_cfg.get("positive_weight", 10),
-        exclusion_weight=model_cfg.get("exclusion_weight", 0.05),
+    exclusion_weight=model_cfg.get("exclusion_weight", 0.05),
+    exclusion_groups=model_cfg.get("exclusion_groups"),
         ckpt_path=bool(config["trainer"].get("ckpt_path")),
     )
 

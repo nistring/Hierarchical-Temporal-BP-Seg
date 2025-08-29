@@ -8,7 +8,7 @@ import yaml
 import os
 
 
-def process_video(video_source, output_path, model, image_size):
+def process_video(video_source, output_path, model, image_size, device):
     cap = cv2.VideoCapture(video_source)
     
     out = None
@@ -27,7 +27,7 @@ def process_video(video_source, output_path, model, image_size):
         if not ret:
             break
 
-        frame = v2.ToImage()(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)).cuda()
+        frame = v2.ToImage()(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)).to(device)
         tensor_input = v2.ToDtype(torch.float32, scale=True)(v2.Resize(image_size)(frame))[None, None]
 
         with torch.no_grad():
@@ -52,7 +52,7 @@ def process_video(video_source, output_path, model, image_size):
     cv2.destroyAllWindows()
 
 
-def main(config, input_folder, output_folder, checkpoint_path):
+def main(config, input_folder, output_folder, checkpoint_path, gpu):
     os.makedirs(output_folder, exist_ok=True)
     model_config = config["model"].copy()
     model_config["image_size"] = tuple(model_config["image_size"])
@@ -61,16 +61,17 @@ def main(config, input_folder, output_folder, checkpoint_path):
     if "kernel_size" in model_config:
         model_config["kernel_size"] = tuple(model_config["kernel_size"])
     
-    model = load_model(TemporalSegmentationModel(**model_config), checkpoint_path).cuda()
+    device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
+    model = load_model(TemporalSegmentationModel(**model_config), checkpoint_path).to(device)
 
     if str(input_folder).isdigit():
-        process_video(int(input_folder), None, model, model_config["image_size"])
+        process_video(int(input_folder), None, model, model_config["image_size"], device)
         return
 
     for video_file in os.listdir(input_folder):
         video_source = os.path.join(input_folder, video_file)
         output_path = os.path.join(output_folder, video_file)
-        process_video(video_source, output_path, model, model_config["image_size"])
+        process_video(video_source, output_path, model, model_config["image_size"], device)
 
 
 if __name__ == "__main__":
@@ -81,10 +82,11 @@ if __name__ == "__main__":
     parser.add_argument("--input_folder", type=str, required=True, help="Path to input folder containing video files or camera index")
     parser.add_argument("--output_folder", type=str, required=True, help="Path to output folder to save processed videos")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU device id to use")
 
     args = parser.parse_args()
 
     with open(args.config, "r") as file:
         config = yaml.safe_load(file)
 
-    main(config, args.input_folder, args.output_folder, args.checkpoint)
+    main(config, args.input_folder, args.output_folder, args.checkpoint, args.gpu)

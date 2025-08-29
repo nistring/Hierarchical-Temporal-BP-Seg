@@ -34,15 +34,15 @@ data:
   train:
     data_path: './data/SUIT/images/train'
     annotations_path: './data/SUIT/coco_annotations/train_updated.json'
-    sequence_length: 100 # truncated_bptt_steps x sequence_length = 500
-    batch_size: 1 # Batch size x sequence_length = 100 
-    truncated_bptt_steps: 5 # Should be equal to gradient accumulation steps
+    sequence_length: 50 # truncated_bptt_steps x sequence_length = 500
+    batch_size: 2 # Batch size x sequence_length = 100 
+    truncated_bptt_steps: 10
   val:
     data_path: './data/SUIT/images/val'
     annotations_path: './data/SUIT/coco_annotations/val_updated.json'
-    sequence_length: 100
-    batch_size: 1
-    truncated_bptt_steps: 5
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
   num_workers: 12 # Number of workers x number of GPUs = 48
 
 logging:

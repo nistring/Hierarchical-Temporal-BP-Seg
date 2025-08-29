@@ -26,10 +26,12 @@ class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes,
                  temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1,
                  freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard", 
-                 encoder_weights="imagenet", temporal_upsampling="bilinear", **model_kwargs):
+                 encoder_weights="imagenet", temporal_upsampling="bilinear",
+                 use_hierarchical_fusion: bool = True, **model_kwargs):
         super().__init__()        
         self.num_classes = num_classes
         self.temporal_upsampling = temporal_upsampling
+        self.use_hierarchical_fusion = use_hierarchical_fusion
         
         # Initialize segmentation model
         model_args = {
@@ -52,7 +54,11 @@ class TemporalSegmentationModel(nn.Module):
         out_channels = self.encoder.out_channels[len(self.encoder.out_channels)-temporal_depth:]
         for i in range(len(out_channels)):
             kwargs = {
-                "input_dim": out_channels[i] + out_channels[i + 1] if i + 1 < len(out_channels) else out_channels[i],
+                "input_dim": (
+                    out_channels[i] + out_channels[i + 1]
+                    if (self.use_hierarchical_fusion and i + 1 < len(out_channels))
+                    else out_channels[i]
+                ),
                 "hidden_dim": out_channels[i], "kernel_size": kernel_size,
                 "num_layers": num_layers[i] if isinstance(num_layers, list) else num_layers,
                 "dilation": dilation, "batch_first": True,
@@ -78,7 +84,7 @@ class TemporalSegmentationModel(nn.Module):
                 current_features = features[feature_idx]
 
                 # If not the deepest layer, fuse with upsampled features from the layer below
-                if i < len(self.temporal_modules) - 1:
+                if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
                     prev_temp_features = temporal_features[feature_idx + 1]
                     
                     upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
@@ -102,7 +108,8 @@ class SegmentationTrainer(L.LightningModule):
     def __init__(self, model, train_dataset, val_dataset, test_dataset, batch_size, learning_rate,
                  num_workers, sequence_length, image_size, truncated_bptt_steps, logdir=None,
                  ce_weight=0.5, temporal_depth=1, temporal_loss_weight=1,
-                 negative_weight=100, positive_weight=10, exclusion_weight=0.05, ckpt_path=None, **kwargs):
+                 negative_weight=100, positive_weight=10, exclusion_weight=0.05,
+                 exclusion_groups=None, ckpt_path=None, **kwargs):
         super().__init__()
         self.model = model
         self.train_dataset = train_dataset
@@ -122,6 +129,7 @@ class SegmentationTrainer(L.LightningModule):
         self.negative_weight = negative_weight
         self.exclusion_weight = exclusion_weight
         self.ckpt_path = ckpt_path
+        self.exclusion_groups = exclusion_groups
 
         # Data augmentation
         self.transform = v2.Compose([
@@ -138,7 +146,7 @@ class SegmentationTrainer(L.LightningModule):
         self.loss_crossentropy = nn.CrossEntropyLoss()
         self.loss_temporal = TemporalConsistencyLoss() #PerceptualConsistencyLoss()
         self.loss_sparsity = ContrastiveLoss()
-        self.loss_exclusion = ExclusionLoss()
+        self.loss_exclusion = ExclusionLoss(groups=self.exclusion_groups)
 
     def show_batch(self, win_size=(80, 100), save=True):
         def _to_vis(imgs, masks):
@@ -182,16 +190,16 @@ class SegmentationTrainer(L.LightningModule):
 
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.train_dataset.batch_size,
-                         num_workers=self.num_workers, pin_memory=True,
+                         num_workers=self.num_workers, pin_memory=True, persistent_workers=True, prefetch_factor=2,
                          sampler=DistributedVideoSampler(self.train_dataset, shuffle=True))
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.val_dataset.batch_size,
-                         num_workers=self.num_workers, pin_memory=True,
+                         num_workers=self.num_workers, pin_memory=True, persistent_workers=True, prefetch_factor=2,
                          sampler=DistributedVideoSampler(self.val_dataset, shuffle=False))
 
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=1, num_workers=self.num_workers, pin_memory=True)
+        return DataLoader(self.test_dataset, batch_size=1, num_workers=self.num_workers, pin_memory=True, persistent_workers=True, prefetch_factor=2)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
@@ -251,6 +259,9 @@ class SegmentationTrainer(L.LightningModule):
                     return item
             
             self.hidden_state = detach_nested(self.hidden_state)
+        
+        # No TBPTT
+        # self.hidden_state = None
 
     def training_step(self, batch, batch_idx):
         return self.compute_loss(batch, batch_idx, "train")
@@ -266,6 +277,7 @@ class SegmentationTrainer(L.LightningModule):
 
     def on_test_start(self):
         self.metrics = {metric: [] for metric in ['tp', 'fp', 'fn', 'tn', "video_id"]}
+        self.temporal_drift = []  # accumulate per-video mean inter-frame change
 
         self.video_id = None
         self.test_dataset_name = Path(self.test_dataset.data_dir).name
@@ -278,6 +290,7 @@ class SegmentationTrainer(L.LightningModule):
             for metric in ['tp', 'fp', 'fn', 'tn']:
                 self.metrics[metric].append(torch.zeros(self.model.num_classes, device=self.device))
             self.metrics["video_id"].append(self.video_id)
+            self.temporal_drift.append([])
 
         targets["masks"] = F.one_hot(targets["masks"][0].long(), 
                                    num_classes=self.model.num_classes+1)[..., 1:].permute(0, 3, 1, 2)
@@ -292,6 +305,11 @@ class SegmentationTrainer(L.LightningModule):
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
         tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
+        # temporal consistency metric (lower is better): mean L1 difference across time on softmax
+        probs = torch.softmax(masks, dim=2)  # (B, T, C, H, W)
+        if probs.shape[1] > 1:
+            drift = (probs[:, 1:] - probs[:, :-1]).abs().mean()
+            self.temporal_drift[-1].append(drift.detach())
 
         self.metrics['tp'][-1] += tp.sum(0)
         self.metrics['fp'][-1] += fp.sum(0)
@@ -327,6 +345,14 @@ class SegmentationTrainer(L.LightningModule):
             }
             for i, video_id in enumerate(self.metrics["video_id"])
         }
+
+        # Temporal consistency report (lower is better)
+        if self.temporal_drift:
+            drift_means = [torch.stack(d).mean().item() if len(d) else 0.0 for d in self.temporal_drift]
+            results["temporal_consistency_mean"] = sum(drift_means) / max(len(drift_means), 1)
+            results["temporal_consistency_per_video"] = {
+                str(video_id): drift_means[i] for i, video_id in enumerate(self.metrics["video_id"])
+            }
 
         # Save results
         logdir = Path(self.logdir)

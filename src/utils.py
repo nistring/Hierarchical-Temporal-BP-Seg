@@ -5,7 +5,7 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     """Process video stream and overlay predictions on the frame."""
     colors = torch.Tensor([
         (192, 255, 0), (0, 255, 192), (64, 0, 255), (255, 0, 64),
-        (96, 255, 96), (255, 0, 255), (255, 128, 0), (0, 255, 0), (0, 128, 255)
+        (96, 255, 96), (0, 255, 0), (255, 128, 0), (255, 0, 255),
     ]).to(masks.device)
     
     masks = masks / 2

@@ -35,13 +35,13 @@ data:
     data_path: './data/SUIT/images/train'
     annotations_path: './data/SUIT/coco_annotations/train_updated.json'
     sequence_length: 20 # truncated_bptt_steps x sequence_length = 500
-    batch_size: 25 # Batch size x sequence_length = 100 
+    batch_size: 5 # Batch size x sequence_length = 100 
     truncated_bptt_steps: 25
   val:
     data_path: './data/SUIT/images/val'
     annotations_path: './data/SUIT/coco_annotations/val_updated.json'
     sequence_length: 20 # truncated_bptt_steps x sequence_length = 500
-    batch_size: 25 # Batch size x sequence_length = 100 
+    batch_size: 5 # Batch size x sequence_length = 100 
     truncated_bptt_steps: 25
   num_workers: 12 # Number of workers x number of GPUs = 48
 
