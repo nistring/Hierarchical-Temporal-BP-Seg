@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import LinearLR
 sys.path.append("./")
 import src.temp_module as rnns
 from src.data_loader import UltrasoundTrainDataset, DistributedVideoSampler
-from src.utils import post_processing
+from src.utils import post_processing, process_video_stream
 from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
 
 class TemporalSegmentationModel(nn.Module):
@@ -68,6 +68,7 @@ class TemporalSegmentationModel(nn.Module):
             self.temporal_modules.append(temporal_class(**kwargs))
 
     def forward(self, x, hidden_state=None):
+        hidden_state = list(hidden_state) if hidden_state else None
         batch_size, seq_len, c, h, w = x.size()
         x = x.reshape(batch_size * seq_len, c, h, w)
 
@@ -360,6 +361,26 @@ class SegmentationTrainer(L.LightningModule):
         with open(logdir / results_filename, "w") as f:
             json.dump(results, f, indent=4)
         print(f"Test results saved to {logdir / results_filename}")
+
+
+class TemporalSegmentationExportWrapper(nn.Module):
+    def __init__(self, core_model: TemporalSegmentationModel, image_size=(352, 352)):
+        super().__init__()
+        self.core_model = core_model
+        self.preprocess = v2.Compose([
+            v2.ToImage(),
+            v2.Resize(image_size),
+        ])
+
+    def forward(self, x, *hidden_state):
+        x = self.preprocess(x)
+        out = v2.ToDtype(torch.float32, scale=True)(x)
+        out, hidden = self.core_model(out, hidden_state=hidden_state)
+        out = post_processing(out)[0]
+        x = process_video_stream(x[0, 0], out).to(torch.uint8)
+
+        return [x] + hidden
+
 
 
 if __name__ == "__main__":

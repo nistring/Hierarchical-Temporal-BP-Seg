@@ -126,11 +126,11 @@ class BaseConvLSTM(BaseConvRNN):
 
         for layer_idx in range(self.num_layers):
             output_inner = []
-            h, c = hidden_state[layer_idx]
+            h, c = hidden_state[layer_idx][0], hidden_state[layer_idx][1]
             for t in range(len(cur_layer_input)):
                 h, c = self.cell_list[layer_idx](cur_layer_input[t], [h, c])
                 output_inner.append(h)
-            hidden_state[layer_idx] = (h, c)
+            hidden_state[layer_idx] = torch.stack([h, c])
             
             cur_layer_input = output_inner
 

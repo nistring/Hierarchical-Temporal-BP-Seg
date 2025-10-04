@@ -13,7 +13,8 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     masks = v2.Resize(frame.shape[1:])(masks)
     
     frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)
-    return frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
+    return frame.permute(1, 2, 0) # for exporting to TFLite
+    # return frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
 
 def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
     """Load model weights from checkpoint."""
