@@ -364,22 +364,16 @@ class SegmentationTrainer(L.LightningModule):
 
 
 class TemporalSegmentationExportWrapper(nn.Module):
-    def __init__(self, core_model: TemporalSegmentationModel, image_size=(352, 352)):
+    def __init__(self, core_model: TemporalSegmentationModel):
         super().__init__()
         self.core_model = core_model
-        self.preprocess = v2.Compose([
-            v2.ToImage(),
-            v2.Resize(image_size),
-        ])
 
     def forward(self, x, *hidden_state):
-        x = self.preprocess(x)
-        out = v2.ToDtype(torch.float32, scale=True)(x)
-        out, hidden = self.core_model(out, hidden_state=hidden_state)
+        out, hidden_state = self.core_model(x / 255.0, hidden_state=hidden_state)
         out = post_processing(out)[0]
-        x = process_video_stream(x[0, 0], out).to(torch.uint8)
+        x = process_video_stream(x[0, 0], out)
 
-        return [x] + hidden
+        return [x] + hidden_state
 
 
 
