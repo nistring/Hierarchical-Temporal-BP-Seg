@@ -1,0 +1,50 @@
+Model Summary and FLOPs Information
+==================================================
+
+   | Name                       | Type                        | Params | Mode 
+------------------------------------------------------------------------------------
+0  | model                      | TemporalSegmentationModel   | 4.7 M  | train
+1  | model.encoder              | MixVisionTransformerEncoder | 3.3 M  | train
+2  | model.encoder.patch_embed1 | OverlapPatchEmbed           | 1.7 K  | train
+3  | model.encoder.patch_embed2 | OverlapPatchEmbed           | 18.6 K | train
+4  | model.encoder.patch_embed3 | OverlapPatchEmbed           | 92.6 K | train
+5  | model.encoder.patch_embed4 | OverlapPatchEmbed           | 369 K  | train
+6  | model.encoder.block1       | Sequential                  | 159 K  | train
+7  | model.encoder.norm1        | LayerNorm                   | 64     | train
+8  | model.encoder.block2       | Sequential                  | 236 K  | train
+9  | model.encoder.norm2        | LayerNorm                   | 128    | train
+10 | model.encoder.block3       | Sequential                  | 837 K  | train
+11 | model.encoder.norm3        | LayerNorm                   | 320    | train
+12 | model.encoder.block4       | Sequential                  | 1.6 M  | train
+13 | model.encoder.norm4        | LayerNorm                   | 512    | train
+14 | model.decoder              | SegformerDecoder            | 394 K  | train
+15 | model.decoder.mlp_stage    | ModuleList                  | 132 K  | train
+16 | model.decoder.fuse_stage   | Conv2dReLU                  | 262 K  | train
+17 | model.head                 | SegmentationHead            | 2.3 K  | train
+18 | model.head.0               | Conv2d                      | 2.3 K  | train
+19 | model.head.1               | UpsamplingBilinear2d        | 0      | train
+20 | model.head.2               | Activation                  | 0      | train
+21 | model.temporal_modules     | ModuleList                  | 998 K  | train
+22 | model.temporal_modules.0   | ConvLSTM                    | 17.7 K | train
+23 | model.temporal_modules.1   | ConvLSTM                    | 76.6 K | train
+24 | model.temporal_modules.2   | ConvLSTM                    | 374 K  | train
+25 | model.temporal_modules.3   | ConvLSTM                    | 529 K  | train
+26 | transform                  | Compose                     | 0      | train
+27 | loss_tversky               | TverskyLoss                 | 0      | train
+28 | loss_crossentropy          | CrossEntropyLoss            | 0      | train
+29 | loss_temporal              | TemporalConsistencyLoss     | 0      | train
+30 | loss_sparsity              | ContrastiveLoss             | 0      | train
+31 | loss_exclusion             | ExclusionLoss               | 0      | train
+------------------------------------------------------------------------------------
+4.7 M     Trainable params
+0         Non-trainable params
+4.7 M     Total params
+18.848    Total estimated model params size (MB)
+224       Modules in train mode
+0         Modules in eval mode
+
+FLOPs Information:
+--------------------
+Input shape: torch.Size([1, 1, 1, 416, 416]))
+Forward FLOPs: 11,235,401,216
+Forward GFLOPs: 11.24

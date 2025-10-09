@@ -170,7 +170,7 @@ cython_debug/
 # PyPI configuration file
 .vscode
 .pypirc
-lightning_logs
+lightning_logs/*
 *json
 *png
 *mp4
@@ -185,3 +185,4 @@ scripts
 etc
 *.pte
 *.tflite
+!lightning_logs/seq50

@@ -1,0 +1,54 @@
+best_model_path: null
+config_file: configs/seq50.yaml
+data:
+  num_workers: 12
+  train:
+    annotations_path: ./data/SUIT/coco_annotations/train_updated.json
+    batch_size: 2
+    data_path: ./data/SUIT/images/train
+    sequence_length: 50
+    truncated_bptt_steps: 10
+  val:
+    annotations_path: ./data/SUIT/coco_annotations/val_updated.json
+    batch_size: 2
+    data_path: ./data/SUIT/images/val
+    sequence_length: 50
+    truncated_bptt_steps: 10
+logging:
+  mode: min
+  monitor: val_loss
+mode: train
+model:
+  ce_weight: 0.5
+  conv_type: depthwise
+  dilation: 1
+  encoder_depth: 5
+  encoder_name: mit_b0
+  exclusion_weight: 5
+  freeze_encoder: false
+  image_size:
+  - 416
+  - 416
+  kernel_size:
+  - 3
+  - 3
+  learning_rate: 0.001
+  model_kwargs:
+    decoder_segmentation_channels: 256
+  negative_weight: 5
+  num_classes: 8
+  num_layers: 1
+  positive_weight: 5
+  segmentation_model_name: Segformer
+  temporal_depth: 4
+  temporal_loss_weight: 5
+  temporal_model: ConvLSTM
+trainer:
+  accumulate_grad_batches: 1
+  ckpt_path: null
+  gpus:
+  - 0
+  - 1
+  - 2
+  - 3
+  max_epochs: 20

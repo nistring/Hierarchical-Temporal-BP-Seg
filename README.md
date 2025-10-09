@@ -3,7 +3,7 @@
 This project develops a video object segmentation system using a temporal segmentation model, specifically tailored for ultrasound images. The model integrates a segmentation architecture with temporal modeling capabilities to analyze sequences of images effectively. The goal is to apply this video object segmentation model to a **sequential ultrasound imaging technique (SUIT)** to recognize individual components of the **brachial plexus (BP)**, which is expected to aid in brachial plexus block procedures.
 
 ## Preview
-![Preview](https://www.youtube.com/watch?v=nb6DnPcaAVo)
+[Youtube link](https://www.youtube.com/watch?v=nb6DnPcaAVo)
 
 ## Installation
 
@@ -14,6 +14,8 @@ git clone <repository-url>
 cd temporal-segmentation-project
 pip install -r requirements.txt
 ```
+
+A pretrained weight is provided in `lightning_logs` directory. Use git lfs to download it.
 
 ## Usage
 
