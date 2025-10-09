@@ -1,4 +1,4 @@
-# Video object segmentation for Enhanced Brachial Plexus Visualization in Ultrasound Imaging
+# Real-Time Brachial Plexus Ultrasound Segmentation Using Lightweight Hierarchical Temporal Fusion
 
 This project develops a video object segmentation system using a temporal segmentation model, specifically tailored for ultrasound images. The model integrates a segmentation architecture with temporal modeling capabilities to analyze sequences of images effectively. The goal is to apply this video object segmentation model to a **sequential ultrasound imaging technique (SUIT)** to recognize individual components of the **brachial plexus (BP)**, which is expected to aid in brachial plexus block procedures.
 
