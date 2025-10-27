@@ -135,3 +135,16 @@ class BaseConvLSTM(BaseConvRNN):
             cur_layer_input = output_inner
 
         return torch.stack(output_inner, dim=int(self.batch_first)), hidden_state
+
+    def inference(self, input, hidden_state):
+        # No temporal dimension and num_layers = 1 during inference
+        
+        if hidden_state is None:
+            hidden_state = self.get_init_states(input)
+
+        h, c = hidden_state[0], hidden_state[1]
+        h, c = self.cell_list[0](input, [h, c])
+        input = h
+        hidden_state = torch.stack([h, c])
+
+        return h, hidden_state

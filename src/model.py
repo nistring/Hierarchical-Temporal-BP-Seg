@@ -104,6 +104,37 @@ class TemporalSegmentationModel(nn.Module):
 
         return out, hidden_state
 
+    ''' For exporting single-frame inference '''
+    # def forward(self, x, *hidden_state):
+    #     # No temporal dimension during inference
+    #     hidden_state = list(hidden_state)
+    #     features = [f for f in self.encoder(x / 255.0)]
+    #     temporal_features = features.copy()
+
+    #     if self.temporal_modules:
+    #         start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
+            
+    #         # Process from deepest to shallowest
+    #         for i in range(len(self.temporal_modules) - 1, -1, -1):
+    #             feature_idx = start_idx + i
+    #             current_features = features[feature_idx]
+
+    #             # If not the deepest layer, fuse with upsampled features from the layer below
+    #             if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
+    #                 prev_temp_features = temporal_features[feature_idx + 1]
+    #                 upsampled_features = F.interpolate(prev_temp_features, size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+    #                 # Concatenate along the channel dimension
+    #                 current_features = torch.cat([current_features, upsampled_features], dim=1)
+
+    #             feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
+    #             temporal_features[feature_idx] = feature
+
+    #     out = self.head(self.decoder(temporal_features))
+    #     out = post_processing(out)
+    #     x = process_video_stream(x[0], out)
+
+    #     return [x] + hidden_state
+
 
 class SegmentationTrainer(L.LightningModule):
     def __init__(self, model, train_dataset, val_dataset, test_dataset, batch_size, learning_rate,
@@ -361,21 +392,6 @@ class SegmentationTrainer(L.LightningModule):
         with open(logdir / results_filename, "w") as f:
             json.dump(results, f, indent=4)
         print(f"Test results saved to {logdir / results_filename}")
-
-
-class TemporalSegmentationExportWrapper(nn.Module):
-    def __init__(self, core_model: TemporalSegmentationModel):
-        super().__init__()
-        self.core_model = core_model
-
-    def forward(self, x, *hidden_state):
-        out, hidden_state = self.core_model(x / 255.0, hidden_state=hidden_state)
-        out = post_processing(out)[0]
-        x = process_video_stream(x[0, 0], out)
-
-        return [x] + hidden_state
-
-
 
 if __name__ == "__main__":
     from pathlib import Path

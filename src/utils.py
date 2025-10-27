@@ -9,10 +9,9 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     ]).to(masks.device)
     
     masks = masks / 2
-    masks[0] += 0.5
-    masks = v2.Resize(frame.shape[1:])(masks)
     
-    frame = frame * masks[0] + (masks[1:, None] * colors[:masks.shape[0]-1, :, None, None]).sum(0)
+    # masks = v2.Resize(frame.shape[1:])(masks)
+    frame = frame * (masks[0:1] + 0.5) + (masks[1:].unsqueeze(1) * colors.unsqueeze(-1).unsqueeze(-1)).sum(0)
     return frame.permute(1, 2, 0) # for exporting to TFLite
     # return frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
 
@@ -24,9 +23,9 @@ def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
     return model
 
 def post_processing(masks: torch.Tensor) -> torch.Tensor:
-    """Post-process segmentation masks."""
-    masks = torch.nn.Softmax(dim=1)(masks[0])
-    masks[:, 1:] = masks[:, 1:] * (masks[:, 0:1] < 0.5)
-    masks[:, 0] = 1 - masks[:, 1:].sum(dim=1)
-    
+    masks = torch.nn.Softmax(dim=0)(masks)
+
+    other_classes = masks[1:] * (masks[0:1] < 0.5)
+    class0 = 1 - other_classes.sum(dim=0, keepdim=True)
+    masks = torch.cat([class0, other_classes], dim=0)
     return masks
