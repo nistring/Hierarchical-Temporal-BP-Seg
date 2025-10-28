@@ -6,7 +6,7 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     colors = torch.Tensor([
         (192, 255, 0), (0, 255, 192), (64, 0, 255), (255, 0, 64),
         (96, 255, 96), (0, 255, 0), (255, 128, 0), (255, 0, 255),
-    ]).to(masks.device)
+    ], device=masks.device)
     
     masks = masks / 2
     

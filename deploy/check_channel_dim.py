@@ -8,11 +8,11 @@ import numpy as np
 import yaml
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))  # project root
-from src.model import TemporalSegmentationModel, TemporalSegmentationExportWrapper
+from src.model import TemporalSegmentationModel
 
 
 def load_checkpoint_weights(model: torch.nn.Module, ckpt_path: Path):
-    if not ckpt_path or not ckpt_path.exists():
+    if not ckpt_path:
         print(f"[export] No checkpoint found at {ckpt_path}, exporting randomly initialized weights.")
         return
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
@@ -60,19 +60,13 @@ def build_model_from_config(config_path: Path, override_seq_len: int = None):
         **model_kwargs,
     ).eval()
 
-    seq_len = override_seq_len or cfg["data"]["train"].get("sequence_length", 4)
-    return model, seq_len, num_classes
+    return model
 
 def parse_args():
     p = argparse.ArgumentParser(description="Compile custom temporal segmentation model to Qualcomm AI Hub")
-    p.add_argument("--config", type=Path, default="configs/deeplab.yaml", help="Path to training YAML config")
-    p.add_argument("--checkpoint", default="lightning_logs/deeplab/checkpoints/last.ckpt", type=Path, help="Optional .ckpt path")
+    p.add_argument("--config", type=Path, default="configs/unet.yaml", help="Path to training YAML config")
     p.add_argument("--height", type=int, default=416, help="Input frame height")
     p.add_argument("--width", type=int, default=416, help="Input frame width")
-    p.add_argument("--channels", type=int, default=1, help="Input channels (1 for ultrasound)")
-    p.add_argument("--device-name", type=str, default="Samsung Galaxy S23", help="Target device name on QAI Hub")
-    p.add_argument("--download-name", type=str, default="deeplab.tflite", help="Filename for downloaded model")
-    p.add_argument("--run-sample", action="store_true", help="Run a sample on-device inference after compile")
     return p.parse_args()
 
 
@@ -80,13 +74,13 @@ def main():
     args = parse_args()
 
     # Build core model (sequence length not needed for single-frame wrapper)
-    model, _, num_classes = build_model_from_config(args.config, override_seq_len=None)
-    if args.checkpoint:
-        load_checkpoint_weights(model, args.checkpoint)
+    model_name = args.config.stem
+    model = build_model_from_config(args.config, override_seq_len=None)
+    load_checkpoint_weights(model, f"lightning_logs/{model_name}/checkpoints/last.ckpt")
     # Wrap for flat tensor list output (out + hidden states)
     model = model.eval()
     # Create example input (single frame)
-    input_shape = (1, 1, args.channels, args.height, args.width)
+    input_shape = (1, 1, 1, args.height, args.width)
     example_input = torch.randn(input_shape)
     # Build hidden_state tensors (each: [2, 1, C, H, W] => stacked (c, h))
     hidden_state = model(example_input, None)[1]

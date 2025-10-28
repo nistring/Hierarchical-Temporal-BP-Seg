@@ -129,7 +129,7 @@ class TemporalSegmentationModel(nn.Module):
     #             feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
     #             temporal_features[feature_idx] = feature
 
-    #     out = self.head(self.decoder(temporal_features))
+    #     out = self.head(self.decoder(temporal_features))[0]
     #     out = post_processing(out)
     #     x = process_video_stream(x[0], out)
 

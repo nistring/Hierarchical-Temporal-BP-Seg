@@ -9,11 +9,35 @@ import yaml
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))  # project root
-from src.model import TemporalSegmentationModel, TemporalSegmentationExportWrapper
+from src.model import TemporalSegmentationModel
+
+
+HIDDEN = {
+    "seq50": [  # SegformerB0
+        (32, 104, 104),
+        (64, 52, 52),
+        (160, 26, 26),
+        (256, 13, 13),
+    ],
+    "deeplab": [  # deeplabv3+efficientnetb0, with temporal depth of 1
+        (32, 208, 208),
+        (24, 104, 104),
+        (40, 52, 52),
+        (112, 26, 26),
+        (320, 26, 26),
+    ],
+    "unet": [  # UNet with resnet18 backbone
+        (64, 208, 208),
+        (64, 104, 104),
+        (128, 52, 52),
+        (256, 26, 26),
+        (512, 13, 13),
+    ],
+}
 
 
 def load_checkpoint_weights(model: torch.nn.Module, ckpt_path: Path):
-    if not ckpt_path or not ckpt_path.exists():
+    if not ckpt_path:
         print(
             f"[export] No checkpoint found at {ckpt_path}, exporting randomly initialized weights."
         )
@@ -75,14 +99,8 @@ def parse_args():
     p.add_argument(
         "--config",
         type=Path,
-        default="configs/deeplab416.yaml",
+        default="configs/unet.yaml",
         help="Path to training YAML config",
-    )
-    p.add_argument(
-        "--checkpoint",
-        default="lightning_logs/deeplab416/checkpoints/last.ckpt",
-        type=Path,
-        help="Optional .ckpt path",
     )
     p.add_argument("--height", type=int, default=416, help="Input frame height")
     p.add_argument("--width", type=int, default=416, help="Input frame width")
@@ -96,12 +114,6 @@ def parse_args():
         help="Target device name on QAI Hub",
     )
     p.add_argument(
-        "--download-name",
-        type=str,
-        default="deeplab352.tflite",
-        help="Filename for downloaded model",
-    )
-    p.add_argument(
         "--run-sample",
         action="store_true",
         help="Run a sample on-device inference after compile",
@@ -113,16 +125,20 @@ def main():
     args = parse_args()
 
     # Build core model (sequence length not needed for single-frame wrapper)
+    model_name = args.config.stem
     model = build_model_from_config(args.config, override_seq_len=None)
-    if args.checkpoint:
-        load_checkpoint_weights(model, args.checkpoint)
+    load_checkpoint_weights(model, f"lightning_logs/{model_name}/checkpoints/last.ckpt")
     # Create example input (single frame)
     input_shape = (1, args.channels, args.height, args.width)
     example_input = torch.randn(input_shape)
+
     # Build hidden_state tensors
     hidden_specs = [  # deeplabv3+efficientnetb0, with temporal depth of 1
         (320, 26, 26),
     ]
+
+    hidden_specs = HIDDEN[model_name]
+
     hidden_state = []
     for C, H, W in hidden_specs:
         h = torch.randn(2, 1, C, H, W)
@@ -142,10 +158,10 @@ def main():
         input_specs=dict(
             image=input_shape,
             h0=hidden_state[0].shape,
-            # h1=hidden_state[1].shape,
-            # h2=hidden_state[2].shape,
-            # h3=hidden_state[3].shape,
-            # h4=hidden_state[4].shape,
+            h1=hidden_state[1].shape,
+            h2=hidden_state[2].shape,
+            h3=hidden_state[3].shape,
+            h4=hidden_state[4].shape,
         ),  # list of shapes
     )
     target_model = compile_job.get_target_model()
@@ -159,10 +175,17 @@ def main():
     )
     print("[qualcomm] Profile submitted.")
 
-    # Download compiled artifact
+    # # Download compiled artifact
     print("[qualcomm] Downloading compiled model...")
-    target_model.download(args.download_name)
-    print(f"[qualcomm] Saved compiled model to {args.download_name}")
+    target_model.download(f"deploy/{model_name}.tflite")
+    print(f"[qualcomm] Saved compiled model to {model_name}.tflite")
+
+    # Run inference using the on-device model on the input image
+    # inference_job = hub.submit_inference_job(
+    #     model=target_model,
+    #     device=hub.Device(args.device_name),
+    #     inputs=dict(image=[example_input[0].numpy().astype(np.float32)], h0=[hidden_state[0].numpy().astype(np.float32)]),
+    # )
 
 
 if __name__ == "__main__":
