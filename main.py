@@ -4,6 +4,7 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback, StochasticWeightAveraging
 from src.data_loader import UltrasoundTestDataset, UltrasoundTrainDataset
 from src.model import TemporalSegmentationModel, SegmentationTrainer
+from src.utils import replace_gelu_with_relu
 import yaml
 import torch
 import argparse
@@ -91,11 +92,13 @@ def main(config, best_model_path=None):
         "dilation": model_cfg.get("dilation", 1),
         "conv_type": model_cfg.get("conv_type", "standard"),
         "encoder_weights": model_cfg.get("encoder_weights", "imagenet"),
-    "use_hierarchical_fusion": model_cfg.get("use_hierarchical_fusion", True),
+        "use_hierarchical_fusion": model_cfg.get("use_hierarchical_fusion", True),
         **model_cfg.get("model_kwargs", {})
     }
     
     model = TemporalSegmentationModel(**model_config)
+    if model_cfg.get("use_relu", False):
+        model = replace_gelu_with_relu(model)
     if config["trainer"].get("ckpt_path"):
         model = load_model(model, config["trainer"]["ckpt_path"])
 
@@ -114,12 +117,10 @@ def main(config, best_model_path=None):
         temporal_loss_weight=model_cfg.get("temporal_loss_weight", 0.3),
         negative_weight=model_cfg.get("negative_weight", 100),
         positive_weight=model_cfg.get("positive_weight", 10),
-    exclusion_weight=model_cfg.get("exclusion_weight", 0.05),
-    exclusion_groups=model_cfg.get("exclusion_groups"),
+        exclusion_weight=model_cfg.get("exclusion_weight", 0.05),
+        exclusion_groups=model_cfg.get("exclusion_groups"),
         ckpt_path=bool(config["trainer"].get("ckpt_path")),
     )
-
-    torch.set_float32_matmul_precision("high")
 
     # Setup trainer
     trainer_cfg = config["trainer"]

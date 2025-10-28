@@ -67,51 +67,16 @@ class TemporalSegmentationModel(nn.Module):
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
             self.temporal_modules.append(temporal_class(**kwargs))
 
-    def forward(self, x, hidden_state=None):
-        hidden_state = list(hidden_state) if hidden_state else None
-        batch_size, seq_len, c, h, w = x.size()
-        x = x.reshape(batch_size * seq_len, c, h, w)
+    # def forward(self, x, hidden_state=None):
+    #     hidden_state = list(hidden_state) if hidden_state else None
+    #     batch_size, seq_len, c, h, w = x.size()
+    #     x = x.reshape(batch_size * seq_len, c, h, w)
 
-        features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
-        temporal_features = features.copy()
-
-        if self.temporal_modules:
-            hidden_state = hidden_state or [None] * len(self.temporal_modules)
-            start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
-            
-            # Process from deepest to shallowest
-            for i in range(len(self.temporal_modules) - 1, -1, -1):
-                feature_idx = start_idx + i
-                current_features = features[feature_idx]
-
-                # If not the deepest layer, fuse with upsampled features from the layer below
-                if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
-                    prev_temp_features = temporal_features[feature_idx + 1]
-                    
-                    upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
-                                                       size=current_features.shape[-2:], mode='bilinear', align_corners=False)
-                    upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
-                    
-                    # Concatenate along the channel dimension
-                    current_features = torch.cat([current_features, upsampled_features], dim=2)
-
-                feature, hidden_state[i] = self.temporal_modules[i](current_features, hidden_state[i])
-                temporal_features[feature_idx] = feature
-
-        out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
-        out = self.head(self.decoder(out))
-        out = out.reshape(batch_size, seq_len, *out.shape[1:])
-
-        return out, hidden_state
-
-    ''' For exporting single-frame inference '''
-    # def forward(self, x, *hidden_state):
-    #     # No temporal dimension during inference
-    #     hidden_state = list(hidden_state)
-    #     features = [f for f in self.encoder(x / 255.0)]
+    #     features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
     #     temporal_features = features.copy()
 
     #     if self.temporal_modules:
+    #         hidden_state = hidden_state or [None] * len(self.temporal_modules)
     #         start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
             
     #         # Process from deepest to shallowest
@@ -122,18 +87,53 @@ class TemporalSegmentationModel(nn.Module):
     #             # If not the deepest layer, fuse with upsampled features from the layer below
     #             if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
     #                 prev_temp_features = temporal_features[feature_idx + 1]
-    #                 upsampled_features = F.interpolate(prev_temp_features, size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+                    
+    #                 upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
+    #                                                    size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+    #                 upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
+                    
     #                 # Concatenate along the channel dimension
-    #                 current_features = torch.cat([current_features, upsampled_features], dim=1)
+    #                 current_features = torch.cat([current_features, upsampled_features], dim=2)
 
-    #             feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
+    #             feature, hidden_state[i] = self.temporal_modules[i](current_features, hidden_state[i])
     #             temporal_features[feature_idx] = feature
 
-    #     out = self.head(self.decoder(temporal_features))[0]
-    #     out = post_processing(out)
-    #     x = process_video_stream(x[0], out)
+    #     out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
+    #     out = self.head(self.decoder(out))
+    #     out = out.reshape(batch_size, seq_len, *out.shape[1:])
 
-    #     return [x] + hidden_state
+    #     return out, hidden_state
+
+    ''' For exporting single-frame inference '''
+    def forward(self, x, *hidden_state):
+        # No temporal dimension during inference
+        hidden_state = list(hidden_state)
+        features = [f for f in self.encoder(x / 255.0)]
+        temporal_features = features.copy()
+
+        if self.temporal_modules:
+            start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
+            
+            # Process from deepest to shallowest
+            for i in range(len(self.temporal_modules) - 1, -1, -1):
+                feature_idx = start_idx + i
+                current_features = features[feature_idx]
+
+                # If not the deepest layer, fuse with upsampled features from the layer below
+                if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
+                    prev_temp_features = temporal_features[feature_idx + 1]
+                    upsampled_features = F.interpolate(prev_temp_features, size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+                    # Concatenate along the channel dimension
+                    current_features = torch.cat([current_features, upsampled_features], dim=1)
+
+                feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
+                temporal_features[feature_idx] = feature
+
+        out = self.head(self.decoder(temporal_features))
+        out = post_processing(out)[0]
+        x = process_video_stream(x[0], out)
+
+        return [x] + hidden_state
 
 
 class SegmentationTrainer(L.LightningModule):
@@ -336,7 +336,7 @@ class SegmentationTrainer(L.LightningModule):
             return smp.metrics.get_stats(masks, target_masks, mode="multilabel", threshold=0.5)
 
         masks, self.hidden_state = self.model(images, self.hidden_state)
-        tp, fp, fn, tn = _process_masks_and_get_stats(masks, targets["masks"])
+        tp, fp, fn, tn = _process_masks_and_get_stats(masks[0], targets["masks"])
         # temporal consistency metric (lower is better): mean L1 difference across time on softmax
         probs = torch.softmax(masks, dim=2)  # (B, T, C, H, W)
         if probs.shape[1] > 1:

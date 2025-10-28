@@ -23,9 +23,19 @@ def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
     return model
 
 def post_processing(masks: torch.Tensor) -> torch.Tensor:
-    masks = torch.nn.Softmax(dim=0)(masks)
+    masks = torch.nn.Softmax(dim=1)(masks)
 
-    other_classes = masks[1:] * (masks[0:1] < 0.5)
-    class0 = 1 - other_classes.sum(dim=0, keepdim=True)
-    masks = torch.cat([class0, other_classes], dim=0)
+    other_classes = masks[:, 1:] * (masks[:, 0:1] < 0.5)
+    class0 = 1 - other_classes.sum(dim=1, keepdim=True)
+    masks = torch.cat([class0, other_classes], dim=1)
     return masks
+
+def replace_gelu_with_relu(model: torch.nn.Module) -> torch.nn.Module:
+    """Replace all GeLU activations with ReLU in a model."""
+    for module in model.modules():
+        for name, child in module.named_children():
+            if isinstance(child, torch.nn.GELU):
+                setattr(module, name, torch.nn.ReLU())
+            elif isinstance(child, torch.nn.Module):
+                replace_gelu_with_relu(child)
+    return model

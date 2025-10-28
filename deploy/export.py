@@ -3,17 +3,23 @@ from pathlib import Path
 
 import qai_hub as hub
 import torch
-import numpy as np
 
 import yaml
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))  # project root
 from src.model import TemporalSegmentationModel
+from src.utils import replace_gelu_with_relu
 
 
 HIDDEN = {
     "seq50": [  # SegformerB0
+        (32, 104, 104),
+        (64, 52, 52),
+        (160, 26, 26),
+        (256, 13, 13),
+    ],
+    "seq50_relu": [  # SegformerB0
         (32, 104, 104),
         (64, 52, 52),
         (160, 26, 26),
@@ -38,9 +44,7 @@ HIDDEN = {
 
 def load_checkpoint_weights(model: torch.nn.Module, ckpt_path: Path):
     if not ckpt_path:
-        print(
-            f"[export] No checkpoint found at {ckpt_path}, exporting randomly initialized weights."
-        )
+        print(f"[export] No checkpoint found at {ckpt_path}, exporting randomly initialized weights.")
         return
     ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     state_dict = ckpt.get("state_dict", ckpt)
@@ -52,9 +56,7 @@ def load_checkpoint_weights(model: torch.nn.Module, ckpt_path: Path):
         else:
             new_state[k] = v
     missing, unexpected = model.load_state_dict(new_state, strict=False)
-    print(
-        f"[export] Loaded checkpoint. Missing: {len(missing)} Unexpected: {len(unexpected)}"
-    )
+    print(f"[export] Loaded checkpoint. Missing: {len(missing)} Unexpected: {len(unexpected)}")
 
 
 def build_model_from_config(config_path: Path, override_seq_len: int = None):
@@ -87,15 +89,16 @@ def build_model_from_config(config_path: Path, override_seq_len: int = None):
         temporal_depth=temporal_depth,
         conv_type=conv_type,
         **model_kwargs,
-    ).eval()
+    )
 
-    return model
+    if mcfg.get("use_relu", False):
+        model = replace_gelu_with_relu(model)
+
+    return model.eval()
 
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Compile custom temporal segmentation model to Qualcomm AI Hub"
-    )
+    p = argparse.ArgumentParser(description="Compile custom temporal segmentation model to Qualcomm AI Hub")
     p.add_argument(
         "--config",
         type=Path,
@@ -104,9 +107,7 @@ def parse_args():
     )
     p.add_argument("--height", type=int, default=416, help="Input frame height")
     p.add_argument("--width", type=int, default=416, help="Input frame width")
-    p.add_argument(
-        "--channels", type=int, default=1, help="Input channels (1 for ultrasound)"
-    )
+    p.add_argument("--channels", type=int, default=1, help="Input channels (1 for ultrasound)")
     p.add_argument(
         "--device-name",
         type=str,
@@ -132,13 +133,7 @@ def main():
     input_shape = (1, args.channels, args.height, args.width)
     example_input = torch.randn(input_shape)
 
-    # Build hidden_state tensors
-    hidden_specs = [  # deeplabv3+efficientnetb0, with temporal depth of 1
-        (320, 26, 26),
-    ]
-
     hidden_specs = HIDDEN[model_name]
-
     hidden_state = []
     for C, H, W in hidden_specs:
         h = torch.randn(2, 1, C, H, W)
@@ -161,8 +156,9 @@ def main():
             h1=hidden_state[1].shape,
             h2=hidden_state[2].shape,
             h3=hidden_state[3].shape,
-            h4=hidden_state[4].shape,
+            # h4=hidden_state[4].shape,
         ),  # list of shapes
+        options="--quantize_io --quantize_io_type uint8",
     )
     target_model = compile_job.get_target_model()
     print("[qualcomm] Compile complete.")
