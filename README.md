@@ -7,7 +7,7 @@ This project develops a video object segmentation system using a temporal segmen
 [Preprint](https://www.techrxiv.org/doi/full/10.36227/techrxiv.176117951.13856310/v1)
 
 ## Note
-This is an advanced study building on our [previous work](https://github.com/nistring/Ultrasound-Optimal-View-Detection) in ultrasound image classification and segmentation. Data are currently unavailable, but we plan to upload them soon. This model is most suitable for use with the _Sonosite_ ultrasound machine. We aim to develop a real-time application in our upcoming research. Feel free to contact us should you have any questions. Thanks!
+This is an advanced study building on our [previous work](https://github.com/nistring/Ultrasound-Optimal-View-Detection) in ultrasound image classification and segmentation. Data are currently unavailable, but we plan to upload them soon. This model is most suitable for use with the _Sonosite_ ultrasound machine.We have newly opened a real-time NPU-accelerated Android app! (https://github.com/nistring/SUIT-app). I apologize for not providing detailed documentation on this. Feel free to contact us should you have any questions. Thanks!
 
 ## Preview
 [Youtube link](https://www.youtube.com/watch?v=nb6DnPcaAVo)
