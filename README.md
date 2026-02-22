@@ -23,6 +23,7 @@ pip install -r requirements.txt
 ```
 
 A pretrained weight is provided in `lightning_logs` directory. Use git lfs to download it.
+Compiled weights can be downloaded from a [Google Drive](https://drive.google.com/drive/folders/1o2LHaAs774_LCP0G5KFya3torGOPq4aK?usp=sharing) folder that supports Galaxy Tab S8, S9, S10, and S11.
 
 ## Usage
 
