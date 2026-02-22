@@ -1,9 +1,7 @@
 import argparse
 from pathlib import Path
 
-import qai_hub as hub
 import torch
-
 import yaml
 import sys
 
@@ -41,6 +39,16 @@ HIDDEN = {
     ],
 }
 
+# device-name -> (chipset, target_id)
+# For qualcomm: target_id is the QAI Hub device name
+# For mediatek: target_id is the SocModel enum name (MT69xx)
+DEVICES = {
+    "Galaxy Tab S8":  ("qualcomm", "Samsung Galaxy Tab S8"),
+    "Galaxy Tab S9":  ("qualcomm", "Samsung Galaxy S23"),       # Snapdragon 8 Gen 2
+    "Galaxy Tab S10": ("mediatek", "MT6989"),                    # Dimensity 9300+
+    "Galaxy Tab S11": ("mediatek", "MT6991"),                    # Dimensity 9400+
+}
+
 
 def load_checkpoint_weights(model: torch.nn.Module, ckpt_path: Path):
     if not ckpt_path:
@@ -64,7 +72,6 @@ def build_model_from_config(config_path: Path, override_seq_len: int = None):
         cfg = yaml.safe_load(f)
 
     mcfg = cfg["model"]
-    # Provide sane mobile-friendly defaults if not present
     encoder_name = mcfg.get("encoder_name", "mit_b0")
     segmentation_model_name = mcfg.get("segmentation_model_name", "Segformer")
     num_classes = mcfg.get("num_classes", 8)
@@ -98,90 +105,86 @@ def build_model_from_config(config_path: Path, override_seq_len: int = None):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Compile custom temporal segmentation model to Qualcomm AI Hub")
-    p.add_argument(
-        "--config",
-        type=Path,
-        default="configs/unet.yaml",
-        help="Path to training YAML config",
-    )
+    p = argparse.ArgumentParser(description="Export temporal segmentation model for on-device deployment")
+    p.add_argument("--config", type=Path, default="configs/seq50_relu.yaml", help="Path to training YAML config")
     p.add_argument("--height", type=int, default=416, help="Input frame height")
     p.add_argument("--width", type=int, default=416, help="Input frame width")
     p.add_argument("--channels", type=int, default=1, help="Input channels (1 for ultrasound)")
     p.add_argument(
-        "--device-name",
-        type=str,
-        default="Samsung Galaxy S23",
-        help="Target device name on QAI Hub",
-    )
-    p.add_argument(
-        "--run-sample",
-        action="store_true",
-        help="Run a sample on-device inference after compile",
+        "--device-name", type=str, default="Galaxy Tab S9",
+        choices=list(DEVICES.keys()),
+        help="Target device",
     )
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
+def export_mediatek(model, model_name, example_input, input_shape, soc, device_suffix):
+    """Convert PyTorch model to TFLite with AOT compilation for MediaTek NPU."""
+    import litert_torch
+    from ai_edge_litert.aot.vendors.mediatek.target import SocModel, Target
 
-    # Build core model (sequence length not needed for single-frame wrapper)
-    model_name = args.config.stem
-    model = build_model_from_config(args.config, override_seq_len=None)
-    load_checkpoint_weights(model, f"lightning_logs/{model_name}/checkpoints/last.ckpt")
-    # Create example input (single frame)
-    input_shape = (1, args.channels, args.height, args.width)
-    example_input = torch.randn(input_shape)
+    target = Target(soc_model=SocModel[soc])
+    print(f"[mediatek] Converting + AOT compiling for {soc} with input shape: {input_shape}")
+    compiled_models = (
+        litert_torch
+        .experimental_add_compilation_backend(target)
+        .convert(model, tuple(example_input))
+    )
+    print(compiled_models.compilation_report())
 
-    hidden_specs = HIDDEN[model_name]
-    hidden_state = []
-    for C, H, W in hidden_specs:
-        h = torch.randn(2, 1, C, H, W)
-        hidden_state.append(h)
+    out_dir = f"deploy/{model_name}_{device_suffix}"
+    compiled_models.export(out_dir, model_name=model_name)
+    print(f"[mediatek] Exported AOT-compiled model to {out_dir}/")
 
-    example_input = [example_input] + hidden_state
-    # TorchScript trace
-    print("[qualcomm] Tracing model with input shape:", input_shape)
+
+def export_qualcomm(model, model_name, example_input, input_shape, hidden_state, hub_device, device_suffix):
+    """Compile model via Qualcomm AI Hub."""
+    import qai_hub as hub
+
+    print(f"[qualcomm] Tracing model with input shape: {input_shape}")
     traced = torch.jit.trace(model, example_input)
     traced = torch.jit.freeze(traced)
 
-    # Submit compile job
     print("[qualcomm] Submitting compile job...")
     compile_job = hub.submit_compile_job(
         model=traced,
-        device=hub.Device(args.device_name),
+        device=hub.Device(hub_device),
         input_specs=dict(
             image=input_shape,
-            h0=hidden_state[0].shape,
-            h1=hidden_state[1].shape,
-            h2=hidden_state[2].shape,
-            h3=hidden_state[3].shape,
-            # h4=hidden_state[4].shape,
-        ),  # list of shapes
+            **{f"h{i}": hidden_state[i].shape for i in range(len(hidden_state))},
+        ),
         options="--quantize_io --quantize_io_type uint8",
     )
     target_model = compile_job.get_target_model()
     print("[qualcomm] Compile complete.")
 
-    # Optional profiling
     print("[qualcomm] Submitting profile job...")
-    hub.submit_profile_job(
-        model=target_model,
-        device=hub.Device(args.device_name),
-    )
+    hub.submit_profile_job(model=target_model, device=hub.Device(hub_device))
     print("[qualcomm] Profile submitted.")
 
-    # # Download compiled artifact
+    out_path = f"deploy/{model_name}_{device_suffix}.tflite"
     print("[qualcomm] Downloading compiled model...")
-    target_model.download(f"deploy/{model_name}.tflite")
-    print(f"[qualcomm] Saved compiled model to {model_name}.tflite")
+    target_model.download(out_path)
+    print(f"[qualcomm] Saved compiled model to {out_path}")
 
-    # Run inference using the on-device model on the input image
-    # inference_job = hub.submit_inference_job(
-    #     model=target_model,
-    #     device=hub.Device(args.device_name),
-    #     inputs=dict(image=[example_input[0].numpy().astype(np.float32)], h0=[hidden_state[0].numpy().astype(np.float32)]),
-    # )
+
+def main():
+    args = parse_args()
+    chipset, target_id = DEVICES[args.device_name]
+    device_suffix = args.device_name.split()[-1]  # e.g. "S10"
+
+    model_name = args.config.stem
+    model = build_model_from_config(args.config, override_seq_len=None)
+    load_checkpoint_weights(model, f"lightning_logs/{model_name}/checkpoints/last.ckpt")
+
+    input_shape = (1, args.channels, args.height, args.width)
+    hidden_state = [torch.randn(2, 1, C, H, W) for C, H, W in HIDDEN[model_name]]
+    example_input = [torch.randn(input_shape)] + hidden_state
+
+    if chipset == "mediatek":
+        export_mediatek(model, model_name, example_input, input_shape, target_id, device_suffix)
+    else:
+        export_qualcomm(model, model_name, example_input, input_shape, hidden_state, target_id, device_suffix)
 
 
 if __name__ == "__main__":
