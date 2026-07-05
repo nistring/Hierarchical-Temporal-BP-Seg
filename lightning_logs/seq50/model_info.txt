@@ -40,7 +40,7 @@ Model Summary and FLOPs Information
 0         Non-trainable params
 4.7 M     Total params
 18.848    Total estimated model params size (MB)
-224       Modules in train mode
+220       Modules in train mode
 0         Modules in eval mode
 
 FLOPs Information:

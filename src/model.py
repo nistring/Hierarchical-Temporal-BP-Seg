@@ -3,7 +3,9 @@ import sys
 import yaml
 from pathlib import Path
 
+import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 import lightning as L
 import torch
 import torch.nn as nn
@@ -25,14 +27,14 @@ from src.losses import ContrastiveLoss, TemporalConsistencyLoss, ExclusionLoss
 class TemporalSegmentationModel(nn.Module):
     def __init__(self, encoder_name, segmentation_model_name, num_classes,
                  temporal_model="ConvLSTM", num_layers=1, encoder_depth=5, temporal_depth=1,
-                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard", 
+                 freeze_encoder=False, kernel_size=(3, 3), dilation=2, conv_type="standard",
                  encoder_weights="imagenet", temporal_upsampling="bilinear",
                  use_hierarchical_fusion: bool = True, **model_kwargs):
-        super().__init__()        
+        super().__init__()
         self.num_classes = num_classes
         self.temporal_upsampling = temporal_upsampling
         self.use_hierarchical_fusion = use_hierarchical_fusion
-        
+
         # Initialize segmentation model
         model_args = {
             "encoder_name": encoder_name, "encoder_weights": encoder_weights,
@@ -40,7 +42,7 @@ class TemporalSegmentationModel(nn.Module):
         }
         model_args.update(model_kwargs)
         model = getattr(smp, segmentation_model_name)(**model_args)
-        
+
         self.encoder = model.encoder
         self.decoder = model.decoder
         self.head = model.segmentation_head
@@ -67,53 +69,18 @@ class TemporalSegmentationModel(nn.Module):
             temporal_class = getattr(rnns, temporal_model, rnns.ConvLSTM)
             self.temporal_modules.append(temporal_class(**kwargs))
 
-    # def forward(self, x, hidden_state=None):
-    #     hidden_state = list(hidden_state) if hidden_state else None
-    #     batch_size, seq_len, c, h, w = x.size()
-    #     x = x.reshape(batch_size * seq_len, c, h, w)
+    def forward(self, x, hidden_state=None):
+        hidden_state = list(hidden_state) if hidden_state else None
+        batch_size, seq_len, c, h, w = x.size()
+        x = x.reshape(batch_size * seq_len, c, h, w)
 
-    #     features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
-    #     temporal_features = features.copy()
-
-    #     if self.temporal_modules:
-    #         hidden_state = hidden_state or [None] * len(self.temporal_modules)
-    #         start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
-            
-    #         # Process from deepest to shallowest
-    #         for i in range(len(self.temporal_modules) - 1, -1, -1):
-    #             feature_idx = start_idx + i
-    #             current_features = features[feature_idx]
-
-    #             # If not the deepest layer, fuse with upsampled features from the layer below
-    #             if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
-    #                 prev_temp_features = temporal_features[feature_idx + 1]
-                    
-    #                 upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]), 
-    #                                                    size=current_features.shape[-2:], mode='bilinear', align_corners=False)
-    #                 upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
-                    
-    #                 # Concatenate along the channel dimension
-    #                 current_features = torch.cat([current_features, upsampled_features], dim=2)
-
-    #             feature, hidden_state[i] = self.temporal_modules[i](current_features, hidden_state[i])
-    #             temporal_features[feature_idx] = feature
-
-    #     out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
-    #     out = self.head(self.decoder(out))
-    #     out = out.reshape(batch_size, seq_len, *out.shape[1:])
-
-    #     return out, hidden_state
-
-    ''' For exporting single-frame inference '''
-    def forward(self, x, *hidden_state):
-        # No temporal dimension during inference
-        hidden_state = list(hidden_state)
-        features = [f for f in self.encoder(x / 255.0)]
+        features = [f.reshape(batch_size, seq_len, *f.shape[1:]) for f in self.encoder(x)]
         temporal_features = features.copy()
 
         if self.temporal_modules:
+            hidden_state = hidden_state or [None] * len(self.temporal_modules)
             start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
-            
+
             # Process from deepest to shallowest
             for i in range(len(self.temporal_modules) - 1, -1, -1):
                 feature_idx = start_idx + i
@@ -122,18 +89,53 @@ class TemporalSegmentationModel(nn.Module):
                 # If not the deepest layer, fuse with upsampled features from the layer below
                 if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
                     prev_temp_features = temporal_features[feature_idx + 1]
-                    upsampled_features = F.interpolate(prev_temp_features, size=current_features.shape[-2:], mode='bilinear', align_corners=False)
-                    # Concatenate along the channel dimension
-                    current_features = torch.cat([current_features, upsampled_features], dim=1)
 
-                feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
+                    upsampled_features = F.interpolate(prev_temp_features.reshape(-1, *prev_temp_features.shape[2:]),
+                                                       size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+                    upsampled_features = upsampled_features.reshape(batch_size, seq_len, *upsampled_features.shape[1:])
+
+                    # Concatenate along the channel dimension
+                    current_features = torch.cat([current_features, upsampled_features], dim=2)
+
+                feature, hidden_state[i] = self.temporal_modules[i](current_features, hidden_state[i])
                 temporal_features[feature_idx] = feature
 
-        out = self.head(self.decoder(temporal_features))
-        out = post_processing(out)[0]
-        x = process_video_stream(x[0], out)
+        out = [f.reshape(batch_size * seq_len, *f.shape[2:]) for f in temporal_features]
+        out = self.head(self.decoder(*out))
+        out = out.reshape(batch_size, seq_len, *out.shape[1:])
 
-        return [x] + hidden_state
+        return out, hidden_state
+
+    # ''' For exporting single-frame inference '''
+    # def forward(self, x, *hidden_state):
+    #     # No temporal dimension during inference
+    #     hidden_state = list(hidden_state)
+    #     features = [f for f in self.encoder(x / 255.0)]
+    #     temporal_features = features.copy()
+
+    #     if self.temporal_modules:
+    #         start_idx = len(self.encoder.out_channels) - len(self.temporal_modules)
+
+    #         # Process from deepest to shallowest
+    #         for i in range(len(self.temporal_modules) - 1, -1, -1):
+    #             feature_idx = start_idx + i
+    #             current_features = features[feature_idx]
+
+    #             # If not the deepest layer, fuse with upsampled features from the layer below
+    #             if self.use_hierarchical_fusion and i < len(self.temporal_modules) - 1:
+    #                 prev_temp_features = temporal_features[feature_idx + 1]
+    #                 upsampled_features = F.interpolate(prev_temp_features, size=current_features.shape[-2:], mode='bilinear', align_corners=False)
+    #                 # Concatenate along the channel dimension
+    #                 current_features = torch.cat([current_features, upsampled_features], dim=1)
+
+    #             feature, hidden_state[i] = self.temporal_modules[i].inference(current_features, hidden_state[i])
+    #             temporal_features[feature_idx] = feature
+
+    #     out = self.head(self.decoder(*temporal_features))
+    #     out = post_processing(out)[0]
+    #     x = process_video_stream(x[0], out)
+
+    #     return [x] + hidden_state
 
 
 class SegmentationTrainer(L.LightningModule):
@@ -141,7 +143,8 @@ class SegmentationTrainer(L.LightningModule):
                  num_workers, sequence_length, image_size, truncated_bptt_steps, logdir=None,
                  ce_weight=0.5, temporal_depth=1, temporal_loss_weight=1,
                  negative_weight=100, positive_weight=10, exclusion_weight=0.05,
-                 exclusion_groups=None, ckpt_path=None, **kwargs):
+                 exclusion_groups=None, ckpt_path=None, ce_class_weights=None,
+                 manual_annotations_path=None, **kwargs):
         super().__init__()
         self.model = model
         self.train_dataset = train_dataset
@@ -162,6 +165,12 @@ class SegmentationTrainer(L.LightningModule):
         self.exclusion_weight = exclusion_weight
         self.ckpt_path = ckpt_path
         self.exclusion_groups = exclusion_groups
+        # Optional manual-label evaluation: path to a sparse-polygon COCO JSON
+        # (e.g. data/SUIT/coco_annotations/sonosite_val_manual.json). When set,
+        # `test_step` additionally scores predictions against the manual masks
+        # using a partial-label rule — only classes that have a manual label
+        # on a given frame contribute to that frame's metric.
+        self.manual_annotations_path = manual_annotations_path
 
         # Data augmentation
         self.transform = v2.Compose([
@@ -175,7 +184,9 @@ class SegmentationTrainer(L.LightningModule):
 
         # Loss functions
         self.loss_tversky = smp.losses.TverskyLoss(mode="multiclass", from_logits=True, alpha=0.5, beta=0.5)
-        self.loss_crossentropy = nn.CrossEntropyLoss()
+        self.loss_crossentropy = nn.CrossEntropyLoss(
+            weight=torch.tensor(ce_class_weights, dtype=torch.float32) if ce_class_weights else None
+        )
         self.loss_temporal = TemporalConsistencyLoss() #PerceptualConsistencyLoss()
         self.loss_sparsity = ContrastiveLoss()
         self.loss_exclusion = ExclusionLoss(groups=self.exclusion_groups)
@@ -239,8 +250,7 @@ class SegmentationTrainer(L.LightningModule):
         if self.ckpt_path:
             return optimizer
             
-        warmup_steps = int(len(self.train_dataset) / self.batch_size / self.trainer.num_devices / 
-                          self.trainer.accumulate_grad_batches * 3)
+        warmup_steps = int(len(self.train_dataset) / self.batch_size / self.trainer.num_devices * 3)
         scheduler = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps)
         
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1}}
@@ -264,10 +274,28 @@ class SegmentationTrainer(L.LightningModule):
             'exclusion': self.loss_exclusion(masks_flatten)
         }
         
-        total_loss = (losses['tversky'] + self.ce_weight * losses['crossentropy'] + 
-                     self.temporal_loss_weight * losses['temporal'] + 
+        total_loss = (losses['tversky'] + self.ce_weight * losses['crossentropy'] +
+                     self.temporal_loss_weight * losses['temporal'] +
                      self.positive_weight * positive + self.negative_weight * negative +
                      self.exclusion_weight * losses['exclusion'])
+
+        # Deep-supervision aux loss for EGE-UNet (binary foreground BCE at
+        # five scales). The 1-channel `gt_pre` heads were designed for binary
+        # segmentation in the original paper; we keep them binary here so the
+        # mask-guided GAB module operates as designed, and supervise against
+        # the foreground/background mask derived from the multi-class target.
+        aux = getattr(self.model, "aux_sigmoids", None)
+        if aux is not None and len(aux) > 0:
+            # The aux heads are post-sigmoid; recover logits via torch.logit
+            # and use BCEWithLogits, which is bf16-autocast-safe (plain BCE
+            # on sigmoided inputs is not).
+            fg = (targets > 0).float().unsqueeze(1)
+            aux_bce = sum(
+                F.binary_cross_entropy_with_logits(torch.logit(a, eps=1e-6), fg)
+                for a in aux
+            ) / len(aux)
+            losses['aux_ds'] = aux_bce
+            total_loss = total_loss + aux_bce
 
         # Log all losses
         for name, loss in losses.items():
@@ -312,7 +340,50 @@ class SegmentationTrainer(L.LightningModule):
         self.temporal_drift = []  # accumulate per-video mean inter-frame change
 
         self.video_id = None
-        self.test_dataset_name = Path(self.test_dataset.data_dir).name
+        # Prefer the annotations file stem (e.g. 'ge_fold0_val_ultrasam') over
+        # the data_dir basename: pooled fold setups point data_dir at
+        # `data/SUIT/images/` (yielding the unhelpful name 'images'), but the
+        # annotations stem encodes vendor + fold + family.
+        ann_path = Path(getattr(self.test_dataset, "annotations_file", "") or "")
+        if ann_path.stem:
+            self.test_dataset_name = ann_path.stem
+        else:
+            self.test_dataset_name = Path(self.test_dataset.data_dir).name
+
+        # Manual-label evaluator (partial-label mode). When
+        # `manual_annotations_path` is provided we pre-build a per-frame map
+        # `image_id -> {coco_category_id: binary_mask}` resized to the model's
+        # `image_size`, plus the COCO-cat -> 0-indexed-model-class mapping.
+        # During `test_step` we score only those (frame, class) pairs that
+        # have a manual label, avoiding penalizing predictions for classes the
+        # annotator left unlabeled.
+        self._manual_per_frame = {}
+        self._manual_cat_to_model = {}
+        self.manual_metrics_per_entry = []
+        if self.manual_annotations_path:
+            from pycocotools.coco import COCO  # noqa: WPS433
+            from src.data_loader import category_match
+            coco = COCO(self.manual_annotations_path)
+            target_h, target_w = self.image_size
+            for img_id in coco.imgs:
+                ann_ids = coco.getAnnIds(imgIds=img_id)
+                if not ann_ids:
+                    continue
+                anns = coco.loadAnns(ann_ids)
+                per_class: dict[int, np.ndarray] = {}
+                for ann in anns:
+                    cat = ann["category_id"]
+                    m = coco.annToMask(ann)
+                    m = cv2.resize(m.astype(np.uint8), (target_w, target_h),
+                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+                    per_class[cat] = (per_class[cat] | m) if cat in per_class else m
+                if per_class:
+                    self._manual_per_frame[img_id] = per_class
+            # COCO category_id (1-10) -> model class index (0-7). category_match
+            # returns the 1-indexed model class; subtract 1 here once.
+            self._manual_cat_to_model = {
+                c: category_match[c] - 1 for c in category_match
+            }
 
     def test_step(self, batch):
         images, targets = batch
@@ -324,9 +395,9 @@ class SegmentationTrainer(L.LightningModule):
             self.metrics["video_id"].append(self.video_id)
             self.temporal_drift.append([])
 
-        targets["masks"] = F.one_hot(targets["masks"][0].long(), 
+        targets["masks"] = F.one_hot(targets["masks"][0].long(),
                                    num_classes=self.model.num_classes+1)[..., 1:].permute(0, 3, 1, 2)
-        
+
         def _process_masks_and_get_stats(masks, target_masks):
             masks = post_processing(masks)[:, 1:]
             masks_argmax = torch.argmax(masks, dim=1, keepdim=True)
@@ -347,6 +418,59 @@ class SegmentationTrainer(L.LightningModule):
         self.metrics['fp'][-1] += fp.sum(0)
         self.metrics['fn'][-1] += fn.sum(0)
         self.metrics['tn'][-1] += tn.sum(0)
+
+        # Partial-label manual eval: score only the (frame, class) pairs that
+        # have a manual annotation. We reuse the same argmax-then-thresholded
+        # prediction as `_process_masks_and_get_stats` so the manual metric is
+        # comparable to the auto-label metric.
+        if self._manual_per_frame:
+            image_ids = targets.get("image_ids")
+            if image_ids is not None:
+                if isinstance(image_ids, torch.Tensor):
+                    image_ids_list = image_ids.flatten().tolist()
+                else:
+                    # default_collate may keep a list-of-lists for batch_size=1
+                    flat = image_ids[0] if (
+                        len(image_ids) == 1 and isinstance(image_ids[0], (list, tuple, torch.Tensor))
+                    ) else image_ids
+                    image_ids_list = [int(x) for x in flat]
+            else:
+                image_ids_list = []
+            if any(int(i) in self._manual_per_frame for i in image_ids_list):
+                m_probs = post_processing(masks[0])[:, 1:]  # (T, C, H, W)
+                argmax = torch.argmax(m_probs, dim=1, keepdim=True)
+                summed = torch.sum(m_probs, dim=1, keepdim=True)
+                preds = torch.zeros_like(m_probs)
+                preds.scatter_(1, argmax, summed)
+                preds_bin = (preds > 0.5)  # (T, C, H, W)
+                for t, img_id in enumerate(image_ids_list):
+                    img_id = int(img_id)
+                    per_class = self._manual_per_frame.get(img_id)
+                    if not per_class:
+                        continue
+                    for cat_id, manual_np in per_class.items():
+                        model_class = self._manual_cat_to_model.get(cat_id)
+                        if model_class is None:
+                            continue
+                        p = preds_bin[t, model_class]
+                        m_t = torch.as_tensor(manual_np, device=p.device)
+                        tp_pix = int((p & m_t).sum().item())
+                        fp_pix = int((p & ~m_t).sum().item())
+                        fn_pix = int((~p & m_t).sum().item())
+                        denom_iou = max(tp_pix + fp_pix + fn_pix, 1)
+                        denom_f1 = max(2 * tp_pix + fp_pix + fn_pix, 1)
+                        denom_p = max(tp_pix + fp_pix, 1)
+                        denom_s = max(tp_pix + fn_pix, 1)
+                        self.manual_metrics_per_entry.append({
+                            "image_id": img_id,
+                            "category_id": int(cat_id),
+                            "model_class": int(model_class),
+                            "iou": tp_pix / denom_iou,
+                            "f1": (2 * tp_pix) / denom_f1,
+                            "precision": tp_pix / denom_p,
+                            "sensitivity": tp_pix / denom_s,
+                            "tp": tp_pix, "fp": fp_pix, "fn": fn_pix,
+                        })
 
     def on_test_epoch_end(self):
         # Stack metrics
@@ -384,6 +508,30 @@ class SegmentationTrainer(L.LightningModule):
             results["temporal_consistency_mean"] = sum(drift_means) / max(len(drift_means), 1)
             results["temporal_consistency_per_video"] = {
                 str(video_id): drift_means[i] for i, video_id in enumerate(self.metrics["video_id"])
+            }
+
+        # Manual-label metrics: average per-(frame, class) IoU/F1/Prec/Sens
+        # over every manual annotation that the test split actually visits.
+        # Frames whose image_id is in the manual COCO but never appear in this
+        # test_dataset are silently skipped (they wouldn't have been scored).
+        if self.manual_metrics_per_entry:
+            entries = self.manual_metrics_per_entry
+            n = len(entries)
+            results["manual_n_entries"] = n
+            for k in ("iou", "f1", "precision", "sensitivity"):
+                results[f"manual_mean_{k}"] = sum(e[k] for e in entries) / n
+            per_class_groups: dict[int, list[dict]] = {}
+            for e in entries:
+                per_class_groups.setdefault(e["category_id"], []).append(e)
+            results["manual_per_category"] = {
+                str(cid): {
+                    "n": len(es),
+                    "mean_iou": sum(x["iou"] for x in es) / len(es),
+                    "mean_f1": sum(x["f1"] for x in es) / len(es),
+                    "mean_precision": sum(x["precision"] for x in es) / len(es),
+                    "mean_sensitivity": sum(x["sensitivity"] for x in es) / len(es),
+                }
+                for cid, es in per_class_groups.items()
             }
 
         # Save results

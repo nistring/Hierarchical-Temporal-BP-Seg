@@ -1,0 +1,54 @@
+trainer:
+  max_epochs: 3
+  gpus:
+  - 0
+  - 1
+  - 2
+  - 3
+  swa:
+    epoch_start: 0.0001
+    lrs: 1.0e-05
+    annealing_epochs: 3
+  ckpt_path: lightning_logs/seq50/checkpoints/last.ckpt
+model:
+  encoder_name: mit_b0
+  segmentation_model_name: Segformer
+  temporal_model: ConvLSTM
+  conv_type: depthwise
+  num_classes: 8
+  freeze_encoder: false
+  num_layers: 1
+  kernel_size:
+  - 3
+  - 3
+  dilation: 1
+  encoder_depth: 5
+  temporal_depth: 4
+  model_kwargs:
+    decoder_segmentation_channels: 256
+  learning_rate: 0.0001
+  image_size:
+  - 416
+  - 416
+  ce_weight: 0.5
+  temporal_loss_weight: 5
+  exclusion_weight: 5
+  positive_weight: 5
+  negative_weight: 5
+data:
+  train:
+    data_path: ./data/SUIT/images/
+    annotations_path: ./data/SUIT/coco_annotations/mindray_fold2_train_sam2.json
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  val:
+    data_path: ./data/SUIT/images/
+    annotations_path: auto
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  num_workers: 12
+logging:
+  monitor: val_loss
+  mode: min

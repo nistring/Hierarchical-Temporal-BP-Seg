@@ -1,0 +1,54 @@
+# R1.5 milder rebalancing: sqrt of inverse pixel-frequency, normalized to mean=1
+# (BG fixed at 1.0). Tests whether the 3.54x SSN spike in the full inverse-
+# frequency scheme overshoots; sqrt compresses the dynamic range while
+# preserving the rank order of rarity.
+#
+# Class order: [BG, C5, C6, C7/MT, C8/LT, UT, SSN, AD, PD]
+# Source (inverse-freq, mean=1): [1.0, 0.9417, 0.9339, 0.2813, 0.67, 0.2939, 3.5373, 0.7559, 0.586]
+# sqrt of foreground weights, renormalized to mean=1: 8 / 7.3435 = 1.0894
+trainer:
+  max_epochs: 20
+  gpus: [0,1,2,3]
+  ckpt_path: null
+
+model:
+  encoder_name: 'mit_b0'
+  segmentation_model_name: 'Segformer'
+  temporal_model: 'ConvLSTM'
+  conv_type: "depthwise"
+  num_classes: 8
+  freeze_encoder: false
+  num_layers: 1
+  kernel_size: [3, 3]
+  dilation: 1
+  encoder_depth: 5
+  temporal_depth: 4
+  model_kwargs:
+    decoder_segmentation_channels: 256
+  learning_rate: 1.0e-3
+  image_size: [416, 416]
+  ce_weight: 0.5
+  temporal_loss_weight: 5
+  exclusion_weight: 5
+  positive_weight: 5
+  negative_weight: 5
+  ce_class_weights: [1.0, 1.0571, 1.0527, 0.5778, 0.8917, 0.5906, 2.0490, 0.9471, 0.8339]
+
+data:
+  train:
+    data_path: './data/SUIT/images/sonosite_train'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_train_ultrasam.json'
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  val:
+    data_path: './data/SUIT/images/sonosite_val'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_val_ultrasam.json'
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  num_workers: 12
+
+logging:
+  monitor: 'val_loss'
+  mode: 'min'

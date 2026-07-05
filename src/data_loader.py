@@ -1,3 +1,4 @@
+import os
 import random
 from typing import Optional, List, Iterator
 import math
@@ -15,6 +16,7 @@ category_match = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 3, 7: 4, 8: 6, 9: 7, 10: 8}
 class BaseUltrasoundDataset(Dataset):
     def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, batch_size: int):
         self.data_dir = data_dir
+        self.annotations_file = annotations_file
         self.coco = COCO(annotations_file)
         self.ids = list(sorted(self.coco.imgs.keys()))
         self.num_classes = 10
@@ -54,7 +56,7 @@ class BaseUltrasoundDataset(Dataset):
 
 
 class UltrasoundTrainDataset(BaseUltrasoundDataset):
-    def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int, 
+    def __init__(self, data_dir: str, annotations_file: str, image_size: tuple, sequence_length: int,
                  truncated_bptt_steps: int, batch_size: int, train: bool = True):
         super().__init__(data_dir, annotations_file, image_size, sequence_length, batch_size)
         self.truncated_bptt_steps = truncated_bptt_steps
@@ -113,8 +115,10 @@ class UltrasoundTestDataset(BaseUltrasoundDataset):
 
 
 class DistributedVideoSampler(DistributedSampler):
-    def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None, 
-                 shuffle: bool = False, seed: int = 0, drop_last: bool = False) -> None:
+    def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None, rank: Optional[int] = None,
+                 shuffle: bool = False, seed: Optional[int] = None, drop_last: bool = False) -> None:
+        if seed is None:
+            seed = int(os.environ.get("SAMPLER_SEED", "0"))
         super().__init__(dataset, num_replicas, rank, shuffle, seed, drop_last)
         num_videos = len(self.dataset.video_id_to_img_ids)
         

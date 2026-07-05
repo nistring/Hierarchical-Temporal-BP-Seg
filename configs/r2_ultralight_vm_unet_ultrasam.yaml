@@ -1,0 +1,48 @@
+# UltraLight VM-UNet (2024) — Mamba-based lightweight baseline, stand-in for
+# the LightCF-Net family the reviewer named (no usable official code there).
+# Same fairness protocol as r2_ege_unet_ultrasam: 416^2 input, segmentation-only
+# loss (Tversky + CE). UltraLight VM-UNet's `gt_pre` heads do not exist in
+# the vendored implementation, so no deep-supervision aux loss is applied.
+trainer:
+  max_epochs: 20
+  gpus: [0, 1, 2, 3]
+  ckpt_path: null
+
+model:
+  segmentation_model_name: 'baseline:ultralight_vm_unet'
+  encoder_name: 'mit_b0'
+  temporal_model: 'ConvLSTM'
+  conv_type: 'depthwise'
+  num_classes: 8
+  freeze_encoder: false
+  num_layers: 1
+  kernel_size: [3, 3]
+  dilation: 1
+  encoder_depth: 5
+  temporal_depth: 0
+  learning_rate: 1.0e-3
+  image_size: [416, 416]
+  ce_weight: 0.5
+  temporal_loss_weight: 0
+  exclusion_weight: 0
+  positive_weight: 0
+  negative_weight: 0
+
+data:
+  train:
+    data_path: './data/SUIT/images/sonosite_train'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_train_ultrasam.json'
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  val:
+    data_path: './data/SUIT/images/sonosite_val'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_val_ultrasam.json'
+    sequence_length: 50
+    batch_size: 2
+    truncated_bptt_steps: 10
+  num_workers: 12
+
+logging:
+  monitor: 'val_loss'
+  mode: 'min'

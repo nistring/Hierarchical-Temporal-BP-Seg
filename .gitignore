@@ -170,7 +170,7 @@ cython_debug/
 # PyPI configuration file
 .vscode
 .pypirc
-lightning_logs/*
+lightning_logs*
 *json
 *png
 *mp4
@@ -178,7 +178,7 @@ lightning_logs/*
 *.pt
 nohup.out
 *visualized*
-menuscript
+menuscript*
 aggregate*
 exps
 scripts
@@ -186,3 +186,9 @@ etc
 *.pte
 *.tflite
 !lightning_logs/seq50
+exp*
+.claude
+CLAUDE.md
+out
+submission
+supplementary*

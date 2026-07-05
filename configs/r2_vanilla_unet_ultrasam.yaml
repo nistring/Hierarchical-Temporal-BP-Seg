@@ -1,0 +1,52 @@
+# Vanilla UNet (Ronneberger 2015) baseline — original double-conv encoder,
+# no pretraining anywhere. Same fairness recipe as r2_ege_unet_ultrasam:
+# 416^2 input, segmentation-only loss (Tversky + CE), temporal/contrastive/
+# exclusion regularizers disabled. Channel schedule 64..1024 -> ~31 M params.
+#
+# Note: seq=10/bs=1 (vs other R2 baselines' seq=50/bs=2) because the 64-channel
+# decoder activations at 416^2 OOM 48GB GPUs above ~10 frames/step. Model is
+# per-frame (temporal_depth=0) so per-step batch size is the only thing that
+# changes; total optimizer steps over 20 epochs simply rise.
+trainer:
+  max_epochs: 20
+  gpus: [0, 1, 2, 3]
+  ckpt_path: null
+
+model:
+  segmentation_model_name: 'baseline:vanilla_unet'
+  encoder_name: 'mit_b0'
+  temporal_model: 'ConvLSTM'
+  conv_type: 'depthwise'
+  num_classes: 8
+  freeze_encoder: false
+  num_layers: 1
+  kernel_size: [3, 3]
+  dilation: 1
+  encoder_depth: 5
+  temporal_depth: 0
+  learning_rate: 1.0e-3
+  image_size: [416, 416]
+  ce_weight: 0.5
+  temporal_loss_weight: 0
+  exclusion_weight: 0
+  positive_weight: 0
+  negative_weight: 0
+
+data:
+  train:
+    data_path: './data/SUIT/images/sonosite_train'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_train_ultrasam.json'
+    sequence_length: 10
+    batch_size: 1
+    truncated_bptt_steps: 10
+  val:
+    data_path: './data/SUIT/images/sonosite_val'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_val_ultrasam.json'
+    sequence_length: 10
+    batch_size: 1
+    truncated_bptt_steps: 10
+  num_workers: 12
+
+logging:
+  monitor: 'val_loss'
+  mode: 'min'

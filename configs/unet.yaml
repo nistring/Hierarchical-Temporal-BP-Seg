@@ -2,7 +2,6 @@
 trainer:
   max_epochs: 20
   gpus: [0,1,2,3]
-  accumulate_grad_batches: 1
   ckpt_path: null
 
 model:
@@ -32,14 +31,14 @@ model:
   negative_weight: 5
 data:
   train:
-    data_path: './data/SUIT/images/train'
-    annotations_path: './data/SUIT/coco_annotations/train_updated.json'
+    data_path: './data/SUIT/images/sonosite_train'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_train_sam2.json'
     sequence_length: 50 # truncated_bptt_steps x sequence_length = 500
     batch_size: 2 # Batch size x sequence_length = 100 
     truncated_bptt_steps: 10
   val:
-    data_path: './data/SUIT/images/val'
-    annotations_path: './data/SUIT/coco_annotations/val_updated.json'
+    data_path: './data/SUIT/images/sonosite_val'
+    annotations_path: './data/SUIT/coco_annotations/sonosite_val_sam2.json'
     sequence_length: 50
     batch_size: 2
     truncated_bptt_steps: 10

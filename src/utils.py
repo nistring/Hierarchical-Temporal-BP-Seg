@@ -3,10 +3,10 @@ from torchvision.transforms import v2
 
 def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     """Process video stream and overlay predictions on the frame."""
-    colors = torch.Tensor([
+    colors = torch.tensor([
         (192, 255, 0), (0, 255, 192), (64, 0, 255), (255, 0, 64),
         (96, 255, 96), (0, 255, 0), (255, 128, 0), (255, 0, 255),
-    ], device=masks.device)
+    ], device=masks.device, dtype=masks.dtype)
     
     masks = masks / 2
     
@@ -16,9 +16,17 @@ def process_video_stream(frame: torch.Tensor, masks: torch.Tensor) -> torch.Tens
     # return frame.permute(1, 2, 0).cpu().numpy().astype("uint8")
 
 def load_model(model: torch.nn.Module, checkpoint_path: str) -> torch.nn.Module:
-    """Load model weights from checkpoint."""
-    weights = torch.load(checkpoint_path)["state_dict"]
-    weights = {k.replace("model.", "", 1): v for k, v in weights.items()}
+    """Load model weights from checkpoint.
+
+    Only keys with the ``model.`` prefix are forwarded — Lightning saves
+    the whole ``SegmentationTrainer`` state, including loss-side buffers
+    like ``loss_crossentropy.weight`` (present whenever ``ce_class_weights``
+    is set). Loading those onto the inner ``TemporalSegmentationModel``
+    used to fail with ``Unexpected key(s)``.
+    """
+    weights = torch.load(checkpoint_path, weights_only=False)["state_dict"]
+    weights = {k[len("model."):]: v
+               for k, v in weights.items() if k.startswith("model.")}
     model.load_state_dict(weights)
     return model
 
